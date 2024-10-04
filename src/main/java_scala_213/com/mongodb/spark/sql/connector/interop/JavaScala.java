@@ -19,7 +19,6 @@ package com.mongodb.spark.sql.connector.interop;
 
 import java.util.List;
 import java.util.Map;
-
 import scala.jdk.CollectionConverters;
 
 /** Utils object to convert Java To Scala to enable cross build */
@@ -36,6 +35,18 @@ public final class JavaScala {
    */
   public static <K, V> scala.collection.Map<K, V> asScala(final Map<K, V> data) {
     return CollectionConverters.MapHasAsScala(data).asScala();
+  }
+
+  /**
+   * Wrapper to convert a java map to an immutable scala map
+   *
+   * @param data java collection
+   * @param <K> key
+   * @param <V> value
+   * @return scala collection
+   */
+  public static <K, V> scala.collection.immutable.Map<K, V> asScalaImmutable(final Map<K, V> data) {
+    return scala.collection.immutable.Map.from(asScala(data));
   }
 
   /**

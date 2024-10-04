@@ -21,25 +21,27 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
+import static org.apache.spark.sql.types.DataTypes.StringType;
+import static org.apache.spark.sql.types.DataTypes.createArrayType;
+import static org.apache.spark.sql.types.DataTypes.createStructType;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.mongodb.spark.sql.connector.config.MongoConfig;
+import com.mongodb.spark.sql.connector.config.ReadConfig;
 import java.util.HashMap;
+import java.util.List;
 import java.util.stream.Stream;
-
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.bson.BsonArray;
+import org.bson.BsonDocument;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
-
-import org.bson.BsonArray;
-import org.bson.BsonDocument;
-
-import com.mongodb.spark.sql.connector.config.MongoConfig;
-import com.mongodb.spark.sql.connector.config.ReadConfig;
 
 public class InferSchemaTest extends SchemaTest {
 
@@ -58,8 +60,7 @@ public class InferSchemaTest extends SchemaTest {
   @MethodSource("documentFieldNames")
   void testStructSchema(final String fieldName) {
     assertEquals(
-        DataTypes.createStructType(
-            singletonList(DataTypes.createStructField("field", getDataType(fieldName), true))),
+        createStructType(singletonList(createStructField("field", getDataType(fieldName)))),
         InferSchema.getDataType(
             new BsonDocument("field", BSON_DOCUMENT_ALL_TYPES.get(fieldName)), READ_CONFIG),
         fieldName + " failed");
@@ -69,7 +70,7 @@ public class InferSchemaTest extends SchemaTest {
   @MethodSource("documentFieldNames")
   void testArraySchema(final String fieldName) {
     assertEquals(
-        DataTypes.createArrayType(getDataType(fieldName), true),
+        createArrayType(getDataType(fieldName), true),
         InferSchema.getDataType(
             new BsonArray(singletonList(BSON_DOCUMENT_ALL_TYPES.get(fieldName))), READ_CONFIG),
         fieldName + " failed");
@@ -87,510 +88,591 @@ public class InferSchemaTest extends SchemaTest {
   void testUpscalingNumberTypesBasedOnNumericPrecedence() {
     assertAll(
         "numeric precedence",
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(DataTypes.createStructField("a", DataTypes.LongType, true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: -1}"),
-                        BsonDocument.parse("{a: 1}"),
-                        BsonDocument.parse("{a: {'$numberLong': '123'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(DataTypes.createStructField("a", DataTypes.DoubleType, true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: -1}"),
-                        BsonDocument.parse("{a: 1.1}"),
-                        BsonDocument.parse("{a: {'$numberLong': '123'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createDecimalType(10, 0), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: 1}}"),
-                        BsonDocument.parse("{a: 2}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '1'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createDecimalType(10, 5), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: {'$numberDecimal' : '1'}}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '10.01'}}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '10000.00001'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createDecimalType(30, 15), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: 1.0}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '10.01'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(DataTypes.createStructField("a", DataTypes.DoubleType, true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse(
-                            "{a: {'$numberDecimal' : '0.1234567890123456789012345678901234'}}"),
-                        BsonDocument.parse(
-                            "{a: {'$numberDecimal' : '1234567890123456789012345678901231'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createDecimalType(20, 0), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: 1}}"),
-                        BsonDocument.parse("{a:  {'$numberLong': '123'}}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '1'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createDecimalType(30, 15), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: {'$numberLong': '123'}}"),
-                        BsonDocument.parse("{a: -1.1}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '1'}}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createDecimalType(30, 15), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: {'$numberLong': '123'}}"),
-                        BsonDocument.parse("{a: -1.1}"),
-                        BsonDocument.parse("{a: {'$numberDecimal' : '-1.00E-8'}}")),
-                    READ_CONFIG)));
+        () -> assertEquals(
+            createStructType(singletonList(createStructField("a", DataTypes.LongType))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: -1}"),
+                    BsonDocument.parse("{a: 1}"),
+                    BsonDocument.parse("{a: {'$numberLong': '123'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField("a", DataTypes.DoubleType))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: -1}"),
+                    BsonDocument.parse("{a: 1.1}"),
+                    BsonDocument.parse("{a: {'$numberLong': '123'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", DataTypes.createDecimalType(10, 0)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: 1}}"),
+                    BsonDocument.parse("{a: 2}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '1'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", DataTypes.createDecimalType(10, 5)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: {'$numberDecimal' : '1'}}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '10.01'}}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '10000.00001'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", DataTypes.createDecimalType(30, 15)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: 1.0}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '10.01'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField("a", DataTypes.DoubleType))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse(
+                        "{a: {'$numberDecimal' : '0.1234567890123456789012345678901234'}}"),
+                    BsonDocument.parse(
+                        "{a: {'$numberDecimal' : '1234567890123456789012345678901231'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", DataTypes.createDecimalType(20, 0)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: 1}}"),
+                    BsonDocument.parse("{a:  {'$numberLong': '123'}}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '1'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", DataTypes.createDecimalType(30, 15)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: {'$numberLong': '123'}}"),
+                    BsonDocument.parse("{a: -1.1}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '1'}}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", DataTypes.createDecimalType(30, 15)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: {'$numberLong': '123'}}"),
+                    BsonDocument.parse("{a: -1.1}"),
+                    BsonDocument.parse("{a: {'$numberDecimal' : '-1.00E-8'}}")),
+                READ_CONFIG)));
 
     assertAll(
         "nested numeric precedence",
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a", DataTypes.createArrayType(DataTypes.LongType, true), true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: [-1]}"),
-                        BsonDocument.parse("{a: [1]}"),
-                        BsonDocument.parse("{a: [{'$numberLong': '123'}]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "a",
-                            DataTypes.createArrayType(DataTypes.createDecimalType(30, 15), true),
-                            true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{a: [{'$numberLong': '123'}]}"),
-                        BsonDocument.parse("{a: [-1.1]}"),
-                        BsonDocument.parse("{a: [{'$numberDecimal' : '1'}]}")),
-                    READ_CONFIG)));
+        () -> assertEquals(
+            createStructType(
+                singletonList(createStructField("a", createArrayType(DataTypes.LongType, true)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: [-1]}"),
+                    BsonDocument.parse("{a: [1]}"),
+                    BsonDocument.parse("{a: [{'$numberLong': '123'}]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "a", createArrayType(DataTypes.createDecimalType(30, 15), true)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{a: [{'$numberLong': '123'}]}"),
+                    BsonDocument.parse("{a: [-1.1]}"),
+                    BsonDocument.parse("{a: [{'$numberDecimal' : '1'}]}")),
+                READ_CONFIG)));
   }
 
   @Test
   @DisplayName("It should be able to infer the schema from arrays")
   void testInferArrays() {
-
     assertAll(
         "arrays simple",
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "arrayField",
-                            DataTypes.createArrayType(DataTypes.StringType, true),
-                            true))),
-                InferSchema.inferSchema(
-                    singletonList(BsonDocument.parse("{arrayField: []}")), READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "arrayField",
-                            DataTypes.createArrayType(DataTypes.BooleanType, true),
-                            true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: []}"),
-                        BsonDocument.parse("{arrayField: [true]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "arrayField",
-                            DataTypes.createArrayType(DataTypes.BooleanType, true),
-                            true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: [true]}"),
-                        BsonDocument.parse("{arrayField: []}"),
-                        BsonDocument.parse("{arrayField: []}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "arrayField",
-                            DataTypes.createArrayType(DataTypes.BooleanType, true),
-                            true))),
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: []}"),
-                        BsonDocument.parse("{arrayField: []}"),
-                        BsonDocument.parse("{arrayField: [false]}"),
-                        BsonDocument.parse("{arrayField: []}")),
-                    READ_CONFIG)));
+        () -> assertEquals(
+            createStructType(singletonList(
+                createStructField("arrayField", createArrayType(DataTypes.StringType, true)))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{arrayField: []}")), READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(
+                createStructField("arrayField", createArrayType(DataTypes.BooleanType, true)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: []}"),
+                    BsonDocument.parse("{arrayField: [true]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(
+                createStructField("arrayField", createArrayType(DataTypes.BooleanType, true)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [true]}"),
+                    BsonDocument.parse("{arrayField: []}"),
+                    BsonDocument.parse("{arrayField: []}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(
+                createStructField("arrayField", createArrayType(DataTypes.BooleanType, true)))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: []}"),
+                    BsonDocument.parse("{arrayField: []}"),
+                    BsonDocument.parse("{arrayField: [false]}"),
+                    BsonDocument.parse("{arrayField: []}")),
+                READ_CONFIG)));
 
-    StructType elementType =
-        DataTypes.createStructType(
-            asList(
-                DataTypes.createStructField("a", DataTypes.IntegerType, true),
-                DataTypes.createStructField("b", DataTypes.IntegerType, true),
-                DataTypes.createStructField("c", DataTypes.IntegerType, true),
-                DataTypes.createStructField("d", DataTypes.IntegerType, true),
-                DataTypes.createStructField("e", DataTypes.IntegerType, true)));
+    assertAll(
+        "arrays nested",
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "arrayField", createArrayType(createArrayType(DataTypes.StringType, true))))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{arrayField: [[]]}")), READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "arrayField", createArrayType(createArrayType(DataTypes.BooleanType, true))))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [[]]}"),
+                    BsonDocument.parse("{arrayField: [[true]]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "arrayField", createArrayType(createArrayType(DataTypes.BooleanType, true))))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [[true]]}"),
+                    BsonDocument.parse("{arrayField: [[]]}"),
+                    BsonDocument.parse("{arrayField: [[]]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "arrayField", createArrayType(createArrayType(DataTypes.BooleanType, true))))),
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [[]]}"),
+                    BsonDocument.parse("{arrayField: [[]]}"),
+                    BsonDocument.parse("{arrayField: [[false]]}"),
+                    BsonDocument.parse("{arrayField: [[]]}")),
+                READ_CONFIG)));
 
-    StructType expectedStructType =
-        DataTypes.createStructType(
-            singletonList(
-                DataTypes.createStructField(
-                    "arrayField", DataTypes.createArrayType(elementType, true), true)));
+    StructType elementType = createStructType(asList(
+        createStructField("a", DataTypes.IntegerType),
+        createStructField("b", DataTypes.IntegerType),
+        createStructField("c", DataTypes.IntegerType),
+        createStructField("d", DataTypes.IntegerType),
+        createStructField("e", DataTypes.IntegerType)));
+
+    StructType expectedStructType = createStructType(
+        singletonList(createStructField("arrayField", createArrayType(elementType, true))));
 
     assertAll(
         "arrays containing structs",
-        () ->
-            assertEquals(
-                expectedStructType,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{arrayField: [{a: 1, b: 2, c: 3, d: 4, e: 5}]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                expectedStructType,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: [{a: 1, e: 2}]}"),
-                        BsonDocument.parse("{arrayField: [{d: 3, c: 4}]}"),
-                        BsonDocument.parse("{arrayField: [{b: 5}]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                expectedStructType,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse(
-                            "{arrayField: [{a: 1, b: 2}, {}, {c: 3}, {d: 4, e: 5}]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                expectedStructType,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: [{a: 1, e: 2}]}"),
-                        BsonDocument.parse("{arrayField: [{d: 3, c: 4}]}"),
-                        BsonDocument.parse("{arrayField: []}"),
-                        BsonDocument.parse("{arrayField: [{b: 5}]}")),
-                    READ_CONFIG)));
+        () -> assertEquals(
+            expectedStructType,
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{arrayField: [{a: 1, b: 2, c: 3, d: 4, e: 5}]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            expectedStructType,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [{a: 1, e: 2}]}"),
+                    BsonDocument.parse("{arrayField: [{d: 3, c: 4}]}"),
+                    BsonDocument.parse("{arrayField: [{b: 5}]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            expectedStructType,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayField: [{a: 1, b: 2}, {}, {c: 3}, {d: 4, e: 5}]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            expectedStructType,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [{a: 1, e: 2}]}"),
+                    BsonDocument.parse("{arrayField: [{d: 3, c: 4}]}"),
+                    BsonDocument.parse("{arrayField: []}"),
+                    BsonDocument.parse("{arrayField: [{b: 5}]}")),
+                READ_CONFIG)));
 
-    StructType expectedNestedStructType =
-        DataTypes.createStructType(
-            singletonList(
-                DataTypes.createStructField(
-                    "arrayField",
-                    DataTypes.createArrayType(DataTypes.createArrayType(elementType, true), true),
-                    true)));
+    StructType expectedNestedStructType = createStructType(singletonList(createStructField(
+        "arrayField", createArrayType(createArrayType(elementType, true), true))));
     assertAll(
         "nested arrays containing structs",
-        () ->
-            assertEquals(
-                expectedNestedStructType,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{arrayField: [[{a: 1, b: 2, c: 3, d: 4, e: 5}]]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                expectedNestedStructType,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: [[{a: 1, e: 2}]]}"),
-                        BsonDocument.parse("{arrayField: [[{d: 3, c: 4}]]}"),
-                        BsonDocument.parse("{arrayField: []}"),
-                        BsonDocument.parse("{arrayField: [[{b: 5}]]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                expectedNestedStructType,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: [[{a: 1, e: 2}]]}"),
-                        BsonDocument.parse("{arrayField: [[{d: 3, c: 4}]]}"),
-                        BsonDocument.parse("{arrayField: [[]]}"),
-                        BsonDocument.parse("{arrayField: [[{b: 5}]]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                expectedNestedStructType,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse(
-                            "{arrayField: [[{a: 1, b: 2}, {}, {c: 3}, {d: 4, e: 5}]]}")),
-                    READ_CONFIG)));
+        () -> assertEquals(
+            expectedNestedStructType,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayField: [[{a: 1, b: 2, c: 3, d: 4, e: 5}]]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            expectedNestedStructType,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [[{a: 1, e: 2}]]}"),
+                    BsonDocument.parse("{arrayField: [[{d: 3, c: 4}]]}"),
+                    BsonDocument.parse("{arrayField: []}"),
+                    BsonDocument.parse("{arrayField: [[]]}"),
+                    BsonDocument.parse("{arrayField: [[{b: 5}]]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            expectedNestedStructType,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [[{a: 1, e: 2}]]}"),
+                    BsonDocument.parse("{arrayField: [[{d: 3, c: 4}]]}"),
+                    BsonDocument.parse("{arrayField: [[]]}"),
+                    BsonDocument.parse("{arrayField: [[{b: 5}]]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            expectedNestedStructType,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayField: [[{a: 1, b: 2}, {}, {c: 3}, {d: 4, e: 5}]]}")),
+                READ_CONFIG)));
 
-    StructType stringArrayStructType =
-        DataTypes.createStructType(
-            singletonList(
-                DataTypes.createStructField(
-                    "arrayField", DataTypes.createArrayType(DataTypes.StringType, true), true)));
+    StructType stringArrayStructType = createStructType(singletonList(
+        createStructField("arrayField", createArrayType(DataTypes.StringType, true))));
 
     assertAll(
         "arrays containing mixed incompatible types",
-        () ->
-            assertEquals(
-                stringArrayStructType,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{arrayField: [{a: 1, b: 2, c: 3, d: 4, e: 5}, 1]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                stringArrayStructType,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayField: [{a: 1, e: 2}]}"),
-                        BsonDocument.parse("{arrayField: [{d: 3, c: 4}]}"),
-                        BsonDocument.parse("{arrayField: [{b: 5}, 1]}")),
-                    READ_CONFIG)),
-        () ->
-            assertEquals(
-                stringArrayStructType,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse(
-                            "{arrayField: [{a: 1, b: 2}, 1, {c: 3}, {d: 4, e: 5}]}")),
-                    READ_CONFIG)));
+        () -> assertEquals(
+            stringArrayStructType,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayField: [{a: 1, b: 2, c: 3, d: 4, e: 5}, 1]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            stringArrayStructType,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayField: [{a: 1, e: 2}]}"),
+                    BsonDocument.parse("{arrayField: [{d: 3, c: 4}]}"),
+                    BsonDocument.parse("{arrayField: [{b: 5}, 1]}")),
+                READ_CONFIG)),
+        () -> assertEquals(
+            stringArrayStructType,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayField: [{a: 1, b: 2}, 1, {c: 3}, {d: 4, e: 5}]}")),
+                READ_CONFIG)));
   }
 
   @Test
   @DisplayName("It should be able to infer map types")
   void testMapTypes() {
-    StructType simpleMapFieldStruct =
-        DataTypes.createStructType(
-            singletonList(
-                DataTypes.createStructField(
-                    "mapField",
-                    DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType),
-                    true)));
+    StructType simpleMapFieldStruct = createStructType(singletonList(createStructField(
+        "mapField", DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType))));
 
-    StructType abcdStruct =
-        DataTypes.createStructType(
-            asList(
-                DataTypes.createStructField("a", DataTypes.IntegerType, true),
-                DataTypes.createStructField("b", DataTypes.IntegerType, true),
-                DataTypes.createStructField("c", DataTypes.IntegerType, true),
-                DataTypes.createStructField("d", DataTypes.IntegerType, true)));
+    StructType abcdStruct = createStructType(asList(
+        createStructField("a", DataTypes.IntegerType),
+        createStructField("b", DataTypes.IntegerType),
+        createStructField("c", DataTypes.IntegerType),
+        createStructField("d", DataTypes.IntegerType)));
 
-    ReadConfig readConfig =
-        READ_CONFIG.withOptions(
-            singletonMap(ReadConfig.INFER_SCHEMA_MAP_TYPE_MINIMUM_KEY_SIZE_CONFIG, "5"));
+    ReadConfig readConfig = READ_CONFIG.withOptions(
+        singletonMap(ReadConfig.INFER_SCHEMA_MAP_TYPE_MINIMUM_KEY_SIZE_CONFIG, "5"));
 
     assertAll(
         "simple map fields",
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(DataTypes.createStructField("mapField", abcdStruct, true))),
-                InferSchema.inferSchema(
-                    singletonList(BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4}}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                simpleMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4, e: 5}}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                simpleMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                simpleMapFieldStruct,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{mapField: {a: 1}}"),
-                        BsonDocument.parse("{mapField: {b: 2, c: 3}}"),
-                        BsonDocument.parse("{mapField: {d: 4, e: 5}}"),
-                        BsonDocument.parse("{mapField: {f: 6}}")),
-                    readConfig)));
+        () -> assertEquals(
+            createStructType(singletonList(createStructField("mapField", abcdStruct))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4}}")),
+                readConfig)),
+        () -> assertEquals(
+            simpleMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4, e: 5}}")),
+                readConfig)),
+        () -> assertEquals(
+            simpleMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}}")),
+                readConfig)),
+        () -> assertEquals(
+            simpleMapFieldStruct,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{mapField: {a: 1}}"),
+                    BsonDocument.parse("{mapField: {b: 2, c: 3}}"),
+                    BsonDocument.parse("{mapField: {d: 4, e: 5}}"),
+                    BsonDocument.parse("{mapField: {f: 6}}")),
+                readConfig)));
 
-    StructType nestedMapFieldStruct =
-        DataTypes.createStructType(
-            singletonList(
-                DataTypes.createStructField(
-                    "mapField",
-                    DataTypes.createStructType(
-                        singletonList(
-                            DataTypes.createStructField(
-                                "nested",
-                                DataTypes.createMapType(
-                                    DataTypes.StringType, DataTypes.IntegerType),
-                                true))),
-                    true)));
+    StructType nestedMapFieldStruct = createStructType(singletonList(createStructField(
+        "mapField",
+        createStructType(singletonList(createStructField(
+            "nested", DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType)))))));
 
     assertAll(
         "nested struct map fields",
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "mapField",
-                            DataTypes.createStructType(
-                                singletonList(
-                                    DataTypes.createStructField("nested", abcdStruct, true))),
-                            true))),
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{mapField: {nested: {a: 1, b: 2, c: 3, d: 4}}}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                nestedMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{mapField: {nested: {a: 1, b: 2, c: 3, d: 4, e: 5}}}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                nestedMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse(
-                            "{mapField: {nested: {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}}}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                nestedMapFieldStruct,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{mapField: {nested: {a: 1}}}"),
-                        BsonDocument.parse("{mapField: {nested: {b: 2, c: 3}}}"),
-                        BsonDocument.parse("{mapField: {nested: {d: 4, e: 5}}}"),
-                        BsonDocument.parse("{mapField: {nested: {f: 6}}}")),
-                    readConfig)));
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "mapField",
+                createStructType(singletonList(createStructField("nested", abcdStruct)))))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{mapField: {nested: {a: 1, b: 2, c: 3, d: 4}}}")),
+                readConfig)),
+        () -> assertEquals(
+            nestedMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{mapField: {nested: {a: 1, b: 2, c: 3, d: 4, e: 5}}}")),
+                readConfig)),
+        () -> assertEquals(
+            nestedMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse(
+                    "{mapField: {nested: {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}}}")),
+                readConfig)),
+        () -> assertEquals(
+            nestedMapFieldStruct,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{mapField: {nested: {a: 1}}}"),
+                    BsonDocument.parse("{mapField: {nested: {b: 2, c: 3}}}"),
+                    BsonDocument.parse("{mapField: {nested: {d: 4, e: 5}}}"),
+                    BsonDocument.parse("{mapField: {nested: {f: 6}}}")),
+                readConfig)));
 
-    StructType arrayMapFieldStruct =
-        DataTypes.createStructType(
-            singletonList(
-                DataTypes.createStructField(
-                    "arrayMapField",
-                    DataTypes.createArrayType(
-                        DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType), true),
-                    true)));
     assertAll(
         "nested array map fields",
-        () ->
-            assertEquals(
-                DataTypes.createStructType(
-                    singletonList(
-                        DataTypes.createStructField(
-                            "arrayMapField", DataTypes.createArrayType(abcdStruct, true), true))),
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{arrayMapField: [{a: 1, b: 2, c: 3, d: 4}]}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                arrayMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse("{arrayMapField: [{a: 1, b: 2, c: 3, d: 4, e: 5}]}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                arrayMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse(
-                            "{arrayMapField: [{a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}]}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                arrayMapFieldStruct,
-                InferSchema.inferSchema(
-                    asList(
-                        BsonDocument.parse("{arrayMapField: [{a: 1}]}"),
-                        BsonDocument.parse("{arrayMapField: [{b: 2, c: 3}]}"),
-                        BsonDocument.parse("{arrayMapField: [{d: 4, e: 5}]}"),
-                        BsonDocument.parse("{arrayMapField: [{f: 6}]}")),
-                    readConfig)),
-        () ->
-            assertEquals(
-                arrayMapFieldStruct,
-                InferSchema.inferSchema(
-                    singletonList(
-                        BsonDocument.parse(
-                            "{arrayMapField: [{a: 1, b: 2}, {c: 3, d: 4}, {e: 5, f: 6}]}")),
-                    readConfig)));
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "arrayMapField", createArrayType(StringType.asNullable(), true)))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{arrayMapField: []}")), readConfig)),
+        () -> assertEquals(
+            createStructType(singletonList(createStructField(
+                "arrayMapField", createArrayType(createArrayType(StringType.asNullable(), true))))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{arrayMapField: [[]]}")), readConfig)));
+
+    StructType arrayMapFieldStruct = createStructType(singletonList(createStructField(
+        "arrayMapField",
+        createArrayType(
+            DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType), true))));
+    assertAll(
+        "nested array map fields containing structs",
+        () -> assertEquals(
+            createStructType(singletonList(
+                createStructField("arrayMapField", createArrayType(abcdStruct, true)))),
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse("{arrayMapField: [{a: 1, b: 2, c: 3, d: 4}]}")),
+                readConfig)),
+        () -> assertEquals(
+            arrayMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayMapField: [{a: 1, b: 2, c: 3, d: 4, e: 5}]}")),
+                readConfig)),
+        () -> assertEquals(
+            arrayMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(
+                    BsonDocument.parse("{arrayMapField: [{a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}]}")),
+                readConfig)),
+        () -> assertEquals(
+            arrayMapFieldStruct,
+            InferSchema.inferSchema(
+                asList(
+                    BsonDocument.parse("{arrayMapField: [{a: 1}]}"),
+                    BsonDocument.parse("{arrayMapField: [{b: 2, c: 3}]}"),
+                    BsonDocument.parse("{arrayMapField: [{d: 4, e: 5}]}"),
+                    BsonDocument.parse("{arrayMapField: [{f: 6}]}")),
+                readConfig)),
+        () -> assertEquals(
+            arrayMapFieldStruct,
+            InferSchema.inferSchema(
+                singletonList(BsonDocument.parse(
+                    "{arrayMapField: [{a: 1, b: 2}, {c: 3, d: 4}, {e: 5, f: 6}]}")),
+                readConfig)));
 
     ReadConfig disabledInferSchemaReadConfig =
-        readConfig.withOptions(
-            new HashMap<String, String>() {
-              {
-                put(ReadConfig.INFER_SCHEMA_MAP_TYPE_ENABLED_CONFIG, "false");
-                put(ReadConfig.INFER_SCHEMA_MAP_TYPE_MINIMUM_KEY_SIZE_CONFIG, "1");
-              }
-            });
+        readConfig.withOptions(new HashMap<String, String>() {
+          {
+            put(ReadConfig.INFER_SCHEMA_MAP_TYPE_ENABLED_CONFIG, "false");
+            put(ReadConfig.INFER_SCHEMA_MAP_TYPE_MINIMUM_KEY_SIZE_CONFIG, "1");
+          }
+        });
 
     assertEquals(
-        DataTypes.createStructType(
-            singletonList(DataTypes.createStructField("mapField", abcdStruct, true))),
+        createStructType(singletonList(createStructField("mapField", abcdStruct))),
         InferSchema.inferSchema(
             singletonList(BsonDocument.parse("{mapField: {a: 1, b: 2, c: 3, d: 4}}")),
             disabledInferSchemaReadConfig));
+  }
+
+  @Test
+  @DisplayName("inclusion of column name when set and theres a corrupt record")
+  void testColumnNameOfCorruptRecord() {
+    List<BsonDocument> docs = asList(
+        BsonDocument.parse("{a: -1}"), BsonDocument.parse("{a: 1}"), BsonDocument.parse("{a: 0}"));
+    StructType structType =
+        createStructType(singletonList(createStructField("a", DataTypes.IntegerType)));
+
+    ReadConfig readConfig = READ_CONFIG;
+    assertEquals(structType, InferSchema.inferSchema(docs, READ_CONFIG));
+
+    readConfig = readConfig.withOption(ReadConfig.PARSE_MODE, "FAILFAST");
+    assertEquals(structType, InferSchema.inferSchema(docs, readConfig));
+
+    readConfig = readConfig.withOption(ReadConfig.PARSE_MODE, "DROPMALFORMED");
+    assertEquals(structType, InferSchema.inferSchema(docs, readConfig));
+
+    readConfig = readConfig.withOption(ReadConfig.PARSE_MODE, "PERMISSIVE");
+    assertEquals(structType, InferSchema.inferSchema(docs, readConfig));
+
+    readConfig = readConfig.withOption(ReadConfig.COLUMN_NAME_OF_CORRUPT_RECORD, "_corrupted");
+    structType = structType.add(createStructField("_corrupted", DataTypes.StringType));
+
+    assertEquals(structType, InferSchema.inferSchema(docs, readConfig));
+  }
+
+  @Test
+  void testSchemaHints() {
+    ReadConfig readConfig = READ_CONFIG.withOption(ReadConfig.SCHEMA_HINTS, "booleanField BOOLEAN");
+    StructType expected = createStructType(asList(
+        createStructField("booleanField", DataTypes.BooleanType),
+        createStructField("intField", DataTypes.IntegerType)));
+
+    // Field Exists
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            asList(
+                BsonDocument.parse("{booleanField: true, intField: 1}"),
+                BsonDocument.parse("{booleanField: false, intField: 2}")),
+            readConfig));
+
+    // Schema hint field not present.
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(singletonList(BsonDocument.parse("{intField: 123}")), readConfig));
+
+    // Schema hint field different type
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            singletonList(BsonDocument.parse("{booleanField: 'string!', intField: 1}")),
+            readConfig));
+  }
+
+  @Test
+  void testNestedSchemaHints() {
+    ReadConfig readConfig =
+        READ_CONFIG.withOption(ReadConfig.SCHEMA_HINTS, "`nested.booleanField` BOOLEAN");
+    StructType expected = createStructType(singletonList(createStructField(
+        "nested",
+        createStructType(asList(
+            createStructField("booleanField", DataTypes.BooleanType),
+            createStructField("intField", DataTypes.IntegerType))))));
+
+    // Field Exists
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            asList(
+                BsonDocument.parse("{nested: {booleanField: true, intField: 1}}"),
+                BsonDocument.parse("{nested: {booleanField: false, intField: 2}}")),
+            readConfig));
+
+    // Schema hint field not present.
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            singletonList(BsonDocument.parse("{nested: {intField: 123}}")), readConfig));
+
+    // Schema hint field different type
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            singletonList(BsonDocument.parse("{nested: {booleanField: 'string!', intField: 1}}")),
+            readConfig));
+
+    readConfig = READ_CONFIG.withOption(ReadConfig.SCHEMA_HINTS, "`a.b.c` Int");
+    expected = createStructType(singletonList(createStructField(
+        "a",
+        createStructType(singletonList(createStructField(
+            "b",
+            createStructType(asList(
+                createStructField("c", DataTypes.IntegerType),
+                createStructField("d", StringType)))))))));
+
+    // Field Exists
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            asList(
+                BsonDocument.parse("{a: {b: {c: 1}}}"),
+                BsonDocument.parse("{a: {b: {d: 'string'}}}")),
+            readConfig));
+
+    // Schema hint field not present.
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            singletonList(BsonDocument.parse("{a: {b: {d: 'string'}}}")), readConfig));
+
+    // Schema hint field different type
+    assertEquals(
+        expected,
+        InferSchema.inferSchema(
+            singletonList(BsonDocument.parse("{a: {b: {c: 'string', d: 'string'}}}")), readConfig));
+
+    // Ensure can handle multiple nested hints
+    readConfig = READ_CONFIG.withOption(ReadConfig.SCHEMA_HINTS, "`a.b.c` Int,`a.b.d` String");
+    assertEquals(
+        expected, InferSchema.inferSchema(singletonList(BsonDocument.parse("{}")), readConfig));
+  }
+
+  @Test
+  void rhsPreferredMergeTest() {
+    // Can handle simple merges
+    DataType lhs = DataType.fromDDL("a LONG");
+    DataType rhs = DataType.fromDDL("b LONG");
+    DataType expected = DataType.fromDDL("a LONG, b LONG");
+    assertEquals(expected, InferSchema.rhsPreferredMerge(lhs, rhs));
+
+    // Uses the RHS type over LHS type.
+    lhs = DataType.fromDDL("a LONG");
+    rhs = DataType.fromDDL("a STRING");
+    expected = DataType.fromDDL("a STRING");
+    assertEquals(expected, InferSchema.rhsPreferredMerge(lhs, rhs));
+
+    // Handles nested structures merging
+    lhs = DataType.fromDDL("a STRUCT<b: INT>");
+    rhs = DataType.fromDDL("a STRUCT<c: INT>");
+    expected = DataType.fromDDL("a STRUCT<b: INT, c: INT>");
+    assertEquals(expected, InferSchema.rhsPreferredMerge(lhs, rhs));
+
+    // Uses the nested RHS type over LHS type.
+    lhs = DataType.fromDDL("a STRUCT<b: STRING>");
+    rhs = DataType.fromDDL("a STRUCT<b: INT>");
+    expected = DataType.fromDDL("a STRUCT<b: INT>");
+    assertEquals(expected, InferSchema.rhsPreferredMerge(lhs, rhs));
+
+    // Handles multiple levels of nesting.
+    lhs = DataType.fromDDL("a STRUCT<b: STRUCT<c: STRING>>");
+    rhs = DataType.fromDDL("a STRUCT<b: STRUCT<d: INT>>");
+    expected = DataType.fromDDL("a STRUCT<b: STRUCT<c: STRING, d: INT>>");
+    assertEquals(expected, InferSchema.rhsPreferredMerge(lhs, rhs));
+
+    // Uses the nested nested RHS type over LHS type.
+    lhs = DataType.fromDDL("a STRUCT<b: STRUCT<c: STRUCT<d: INT>>>");
+    rhs = DataType.fromDDL("a STRUCT<b: STRUCT<c: INT>>");
+    expected = DataType.fromDDL("a STRUCT<b: STRUCT<c: INT>>");
+    assertEquals(expected, InferSchema.rhsPreferredMerge(lhs, rhs));
   }
 
   static Stream<String> documentFieldNames() {
@@ -600,5 +682,9 @@ public class InferSchemaTest extends SchemaTest {
   private DataType getDataType(final String fieldName) {
     return BSON_DOCUMENT_ALL_TYPES_SCHEMA_WITH_PLACEHOLDER
         .fields()[BSON_DOCUMENT_ALL_TYPES_SCHEMA_WITH_PLACEHOLDER.fieldIndex(fieldName)].dataType();
+  }
+
+  private static StructField createStructField(final String name, final DataType dataType) {
+    return DataTypes.createStructField(name, dataType, true, InferSchema.INFERRED_METADATA);
   }
 }

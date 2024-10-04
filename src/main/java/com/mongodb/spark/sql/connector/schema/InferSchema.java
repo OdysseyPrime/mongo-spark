@@ -17,18 +17,27 @@
 
 package com.mongodb.spark.sql.connector.schema;
 
+import static com.mongodb.assertions.Assertions.fail;
 import static java.lang.String.format;
+import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.groupingBy;
 
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Aggregates;
+import com.mongodb.spark.sql.connector.assertions.Assertions;
+import com.mongodb.spark.sql.connector.config.CollectionsConfig;
+import com.mongodb.spark.sql.connector.config.MongoConfig;
+import com.mongodb.spark.sql.connector.config.ReadConfig;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
 import org.apache.spark.sql.catalyst.analysis.TypeCoercion;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
@@ -42,19 +51,12 @@ import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
-import org.jetbrains.annotations.VisibleForTesting;
-
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
 import org.bson.conversions.Bson;
-
-import com.mongodb.client.model.Aggregates;
-
-import com.mongodb.spark.sql.connector.assertions.Assertions;
-import com.mongodb.spark.sql.connector.config.MongoConfig;
-import com.mongodb.spark.sql.connector.config.ReadConfig;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.VisibleForTesting;
 
 /**
  * A helper that determines the {@code StructType} for a {@code BsonDocument} and finds the common
@@ -65,56 +67,147 @@ import com.mongodb.spark.sql.connector.config.ReadConfig;
  */
 @NotNull
 public final class InferSchema {
+  /** Inferred schema metadata */
+  public static final Metadata INFERRED_METADATA = Metadata.fromJson("{\"inferred\": true}");
 
   /**
-   * Infer the schema for the collection
+   * Infer the schema for the specified configuration.
    *
    * @param options the configuration options to determine the namespace to determine the schema for
    * @return the schema
    */
   public static StructType inferSchema(final CaseInsensitiveStringMap options) {
-    ReadConfig readConfig =
-        MongoConfig.readConfig(options.asCaseSensitiveMap())
-            .withOptions(options.asCaseSensitiveMap());
-    ArrayList<Bson> samplePipeline = new ArrayList<>(readConfig.getAggregationPipeline());
-    samplePipeline.add(Aggregates.sample(readConfig.getInferSchemaSampleSize()));
-    return inferSchema(
-        readConfig.withCollection(
-            coll ->
-                coll.aggregate(samplePipeline)
-                    .allowDiskUse(readConfig.getAggregationAllowDiskUse())
-                    .into(new ArrayList<>())),
-        readConfig);
+    ReadConfig readConfig = MongoConfig.readConfig(options.asCaseSensitiveMap())
+        .withOptions(options.asCaseSensitiveMap());
+    CollectionsConfig collectionsConfig = readConfig.getCollectionsConfig();
+    return readConfig.withClient(client -> {
+      MongoDatabase database = client.getDatabase(readConfig.getDatabaseName());
+      Collection<String> collectionNames;
+      switch (collectionsConfig.getType()) {
+        case SINGLE:
+        case MULTIPLE:
+          collectionNames = collectionsConfig.getNames();
+          break;
+        case ALL:
+          collectionNames = database.listCollectionNames().into(new ArrayList<>());
+          break;
+        default:
+          throw fail();
+      }
+      List<BsonDocument> sampleDocuments = new ArrayList<>();
+      ArrayList<Bson> samplePipeline = new ArrayList<>(readConfig.getAggregationPipeline());
+      samplePipeline.add(Aggregates.sample(readConfig.getInferSchemaSampleSize()));
+      for (String collectionName : collectionNames) {
+        database
+            .getCollection(collectionName, BsonDocument.class)
+            .aggregate(samplePipeline)
+            .allowDiskUse(readConfig.getAggregationAllowDiskUse())
+            .comment(readConfig.getComment())
+            .into(sampleDocuments);
+      }
+      return inferSchema(sampleDocuments, readConfig);
+    });
+  }
+
+  /**
+   * @param schema the schema
+   * @return true if the schema has been inferred.
+   */
+  public static boolean isInferred(final StructType schema) {
+    return Arrays.stream(schema.fields()).allMatch(f -> f.metadata().equals(INFERRED_METADATA));
   }
 
   @VisibleForTesting
   static StructType inferSchema(
       final List<BsonDocument> bsonDocuments, final ReadConfig readConfig) {
-    StructType structType =
-        bsonDocuments.stream()
-            .map(d -> getStructType(d, readConfig))
-            .reduce(
-                PLACE_HOLDER_STRUCT_TYPE, (dt1, dt2) -> compatibleStructType(dt1, dt2, readConfig));
+    StructType structType = bsonDocuments.stream()
+        .map(d -> getStructType(d, readConfig))
+        .reduce(PLACE_HOLDER_STRUCT_TYPE, (dt1, dt2) -> compatibleStructType(dt1, dt2, readConfig));
 
-    return DataTypes.createStructType(
-        Arrays.stream(structType.fields())
-            .map(
-                f -> {
-                  if (f.dataType().sameType(PLACE_HOLDER_ARRAY_TYPE)) {
-                    return DataTypes.createStructField(
-                        f.name(),
-                        DataTypes.createArrayType(DataTypes.StringType, true),
-                        f.nullable());
-                  }
-                  return f;
-                })
-            .collect(Collectors.toList()));
+    structType = (StructType) removePlaceholders(structType);
+
+    String corruptDocumentColumnName = readConfig.getColumnNameOfCorruptRecord();
+    if (!corruptDocumentColumnName.isEmpty()) {
+      structType = structType.add(DataTypes.createStructField(
+          corruptDocumentColumnName, DataTypes.StringType, true, INFERRED_METADATA));
+    }
+    return structType;
+  }
+
+  private static DataType removePlaceholders(final DataType dataType) {
+    if (dataType == PLACE_HOLDER_ARRAY_TYPE) {
+      return DataTypes.createArrayType(DataTypes.StringType, true);
+    } else if (dataType instanceof StructType) {
+      StructType structType = (StructType) dataType;
+      return DataTypes.createStructType(Arrays.stream(structType.fields())
+          .map(f -> DataTypes.createStructField(
+              f.name(), removePlaceholders(f.dataType()), f.nullable(), f.metadata()))
+          .collect(Collectors.toList()));
+    } else if (dataType instanceof ArrayType) {
+      ArrayType arrayType = (ArrayType) dataType;
+      return new ArrayType(removePlaceholders(arrayType.elementType()), arrayType.containsNull());
+    } else if (dataType instanceof MapType) {
+      MapType mapType = (MapType) dataType;
+      return new MapType(
+          mapType.keyType(), removePlaceholders(mapType.valueType()), mapType.valueContainsNull());
+    }
+    return dataType;
   }
 
   @NotNull
   private static StructType getStructType(
       final BsonDocument bsonDocument, final ReadConfig readConfig) {
-    return (StructType) getDataType(bsonDocument, readConfig);
+    Map<String, StructField> fieldMap = new HashMap<>();
+    bsonDocument.forEach((k, v) -> {
+      fieldMap.put(k, new StructField(k, getDataType(v, readConfig), true, INFERRED_METADATA));
+    });
+
+    for (StructField f : readConfig.getSchemaHints().fields()) {
+
+      String[] fieldNameParts = f.name().split("\\.");
+      String topLevelFieldName = fieldNameParts[0];
+
+      // Create the hinted StructField
+      // Works through the fieldNameParts in reverse and builds up to the top level field.
+      StructField schemaHintField = null;
+      for (int i = fieldNameParts.length - 1; i >= 0; i--) {
+        String fieldName = fieldNameParts[i];
+        if (schemaHintField == null) {
+          schemaHintField =
+              new StructField(fieldName, f.dataType(), f.nullable(), INFERRED_METADATA);
+        } else {
+          schemaHintField = new StructField(
+              fieldName,
+              DataTypes.createStructType(singletonList(schemaHintField)),
+              true,
+              INFERRED_METADATA);
+        }
+      }
+
+      // Merge datatypes if one already exists
+      if (fieldMap.containsKey(topLevelFieldName)) {
+        StructField inferredStructField = fieldMap.get(topLevelFieldName);
+        DataType mergedDataType =
+            rhsPreferredMerge(inferredStructField.dataType(), schemaHintField.dataType());
+
+        fieldMap.put(
+            fieldNameParts[0],
+            new StructField(
+                inferredStructField.name(),
+                mergedDataType,
+                inferredStructField.nullable(),
+                inferredStructField.metadata()));
+      } else {
+        fieldMap.put(topLevelFieldName, schemaHintField);
+      }
+    }
+
+    List<StructField> structFields = fieldMap.values().stream()
+        .sorted(Comparator.comparing(StructField::name))
+        .collect(Collectors.toList());
+
+    return (StructType)
+        dataTypeCheckStructTypeToMapType(DataTypes.createStructType(structFields), readConfig);
   }
 
   @VisibleForTesting
@@ -124,20 +217,17 @@ public final class InferSchema {
         List<StructField> fields = new ArrayList<>();
         bsonValue
             .asDocument()
-            .forEach(
-                (k, v) ->
-                    fields.add(
-                        new StructField(k, getDataType(v, readConfig), true, Metadata.empty())));
+            .forEach((k, v) -> fields.add(
+                new StructField(k, getDataType(v, readConfig), true, INFERRED_METADATA)));
         return dataTypeCheckStructTypeToMapType(DataTypes.createStructType(fields), readConfig);
       case ARRAY:
-        DataType elementType =
-            bsonValue.asArray().stream()
-                .map(v -> getDataType(v, readConfig))
-                .distinct()
-                .reduce((d1, d2) -> compatibleType(d1, d2, readConfig))
-                .orElse(PLACE_HOLDER_DATA_TYPE);
+        DataType elementType = bsonValue.asArray().stream()
+            .map(v -> getDataType(v, readConfig))
+            .distinct()
+            .reduce((d1, d2) -> compatibleType(d1, d2, readConfig))
+            .orElse(PLACE_HOLDER_DATA_TYPE);
 
-        if (elementType.sameType(PLACE_HOLDER_DATA_TYPE)) {
+        if (elementType == PLACE_HOLDER_DATA_TYPE) {
           return PLACE_HOLDER_ARRAY_TYPE;
         }
         return DataTypes.createArrayType(elementType, true);
@@ -190,21 +280,19 @@ public final class InferSchema {
       return structType2;
     }
 
-    Map<String, List<StructField>> fieldNameToStructFieldMap =
-        Stream.of(structType1.fields(), structType2.fields())
-            .flatMap(Stream::of)
-            .collect(groupingBy(StructField::name));
+    Map<String, List<StructField>> fieldNameToStructFieldMap = Stream.of(
+            structType1.fields(), structType2.fields())
+        .flatMap(Stream::of)
+        .collect(groupingBy(StructField::name));
 
     List<StructField> structFields = new ArrayList<>();
-    fieldNameToStructFieldMap.forEach(
-        (fieldName, groupedStructFields) -> {
-          DataType fieldCommonDataType =
-              groupedStructFields.stream()
-                  .map(StructField::dataType)
-                  .reduce(
-                      PLACE_HOLDER_DATA_TYPE, (dt1, dt2) -> compatibleType(dt1, dt2, readConfig));
-          structFields.add(DataTypes.createStructField(fieldName, fieldCommonDataType, true));
-        });
+    fieldNameToStructFieldMap.forEach((fieldName, groupedStructFields) -> {
+      DataType fieldCommonDataType = groupedStructFields.stream()
+          .map(StructField::dataType)
+          .reduce(PLACE_HOLDER_DATA_TYPE, (dt1, dt2) -> compatibleType(dt1, dt2, readConfig));
+      structFields.add(
+          DataTypes.createStructField(fieldName, fieldCommonDataType, true, INFERRED_METADATA));
+    });
 
     structFields.sort(Comparator.comparing(StructField::name));
     return DataTypes.createStructType(structFields);
@@ -240,43 +328,46 @@ public final class InferSchema {
       return dataType2;
     }
 
-    DataType dataType =
-        TypeCoercion.findTightestCommonType()
-            .apply(dataType1, dataType2)
-            .getOrElse(
-                // dataType1 or dataType2 is a StructType, MapType, ArrayType or a decimal type.
-                () -> {
-                  if (dataType1 instanceof StructType && dataType2 instanceof StructType) {
-                    return compatibleStructType(
-                        (StructType) dataType1, (StructType) dataType2, readConfig);
-                  }
+    DataType dataType = TypeCoercion.findTightestCommonType()
+        .apply(dataType1, dataType2)
+        .getOrElse(
+            // dataType1 or dataType2 is a StructType, MapType, ArrayType or a decimal type.
+            () -> {
+              if (dataType1 instanceof StructType && dataType2 instanceof StructType) {
+                return compatibleStructType(
+                    (StructType) dataType1, (StructType) dataType2, readConfig);
+              }
 
-                  if (dataType1 instanceof ArrayType && dataType2 instanceof ArrayType) {
-                    return compatibleArrayType(
-                        (ArrayType) dataType1, (ArrayType) dataType2, readConfig);
-                  }
+              if (dataType1 instanceof ArrayType && dataType2 instanceof ArrayType) {
+                return compatibleArrayType(
+                    (ArrayType) dataType1, (ArrayType) dataType2, readConfig);
+              }
 
-                  // The case that given `DecimalType` is capable of given `IntegralType` is handled
-                  // in `findTightestCommonTypeOfTwo`. Both cases below will be executed only when
-                  // the given `DecimalType` is not capable of the given `IntegralType`.
-                  if (dataType1 instanceof DecimalType || dataType2 instanceof DecimalType) {
-                    return compatibleDecimalType(dataType1, dataType2);
-                  }
+              // The case that given `DecimalType` is capable of given `IntegralType` is handled
+              // in `findTightestCommonTypeOfTwo`. Both cases below will be executed only when
+              // the given `DecimalType` is not capable of the given `IntegralType`.
+              if (dataType1 instanceof DecimalType || dataType2 instanceof DecimalType) {
+                return compatibleDecimalType(dataType1, dataType2);
+              }
 
-                  // If working with MapTypes and StructTypes append the struct data
-                  if ((dataType1 instanceof MapType && dataType2 instanceof StructType)
-                      || (dataType1 instanceof StructType && dataType2 instanceof MapType)) {
-                    return appendStructToMap(dataType1, dataType2, readConfig);
-                  }
+              // If working with MapTypes and StructTypes append the struct data
+              if ((dataType1 instanceof MapType && dataType2 instanceof StructType)
+                  || (dataType1 instanceof StructType && dataType2 instanceof MapType)) {
+                return appendStructToMap(dataType1, dataType2, readConfig);
+              }
 
-                  return DataTypes.StringType; // Lowest common type
-                });
+              return DataTypes.StringType; // Lowest common type
+            });
 
     return dataTypeCheckStructTypeToMapType(dataType, readConfig);
   }
 
   private static DataType compatibleArrayType(
       final ArrayType arrayType1, final ArrayType arrayType2, final ReadConfig readConfig) {
+
+    if (arrayType1 == PLACE_HOLDER_ARRAY_TYPE) {
+      return arrayType2;
+    }
 
     DataType arrayElementType1 = arrayType1.elementType();
     DataType arrayElementType2 = arrayType2.elementType();
@@ -288,8 +379,7 @@ public final class InferSchema {
           arrayType1.containsNull() || arrayType2.containsNull());
     } else if (arrayElementType1 == PLACE_HOLDER_DATA_TYPE
         && arrayElementType2 == PLACE_HOLDER_DATA_TYPE) {
-      return DataTypes.createArrayType(
-          DataTypes.StringType, arrayType1.containsNull() || arrayType2.containsNull());
+      return PLACE_HOLDER_ARRAY_TYPE;
     } else if (arrayElementType1 != PLACE_HOLDER_DATA_TYPE) {
       return arrayType1;
     } else {
@@ -300,22 +390,19 @@ public final class InferSchema {
   private static DataType appendStructToMap(
       final DataType dataType1, final DataType dataType2, final ReadConfig readConfig) {
     Assertions.ensureArgument(
-        () ->
-            (dataType1 instanceof StructType && dataType2 instanceof MapType)
-                || (dataType1 instanceof MapType && dataType2 instanceof StructType),
-        () ->
-            format(
-                "Requires a StructType and a MapType.  Got: %s, %s",
-                dataType1.typeName(), dataType2.typeName()));
+        () -> (dataType1 instanceof StructType && dataType2 instanceof MapType)
+            || (dataType1 instanceof MapType && dataType2 instanceof StructType),
+        () -> format(
+            "Requires a StructType and a MapType.  Got: %s, %s",
+            dataType1.typeName(), dataType2.typeName()));
     StructType structType =
         dataType1 instanceof StructType ? (StructType) dataType1 : (StructType) dataType2;
     MapType mapType = dataType1 instanceof StructType ? (MapType) dataType2 : (MapType) dataType1;
 
-    DataType valueType =
-        Stream.concat(
-                Stream.of(mapType.valueType()),
-                Arrays.stream(structType.fields()).map(StructField::dataType))
-            .reduce(PLACE_HOLDER_DATA_TYPE, (dt1, dt2) -> compatibleType(dt1, dt2, readConfig));
+    DataType valueType = Stream.concat(
+            Stream.of(mapType.valueType()),
+            Arrays.stream(structType.fields()).map(StructField::dataType))
+        .reduce(PLACE_HOLDER_DATA_TYPE, (dt1, dt2) -> compatibleType(dt1, dt2, readConfig));
     return DataTypes.createMapType(mapType.keyType(), valueType, mapType.valueContainsNull());
   }
 
@@ -323,20 +410,18 @@ public final class InferSchema {
       final DataType dataType1, final DataType dataType2) {
     Assertions.ensureArgument(
         () -> dataType1 instanceof DecimalType || dataType2 instanceof DecimalType,
-        () ->
-            format(
-                "Neither datatype is an instance of DecimalType.  Got: %s, %s",
-                dataType1.typeName(), dataType2.typeName()));
+        () -> format(
+            "Neither datatype is an instance of DecimalType.  Got: %s, %s",
+            dataType1.typeName(), dataType2.typeName()));
     DecimalType decimalType =
         dataType1 instanceof DecimalType ? (DecimalType) dataType1 : (DecimalType) dataType2;
     DataType dataType = dataType1 instanceof DecimalType ? dataType2 : dataType1;
     if (dataType instanceof DecimalType) {
       DecimalType decimalType2 = (DecimalType) dataType;
       int scale = Math.max(decimalType.scale(), decimalType2.scale());
-      int range =
-          Math.max(
-              decimalType.precision() - decimalType.scale(),
-              decimalType2.precision() - decimalType2.scale());
+      int range = Math.max(
+          decimalType.precision() - decimalType.scale(),
+          decimalType2.precision() - decimalType2.scale());
 
       if (range + scale > 38) {
         // DecimalType can't support precision > 38
@@ -360,31 +445,66 @@ public final class InferSchema {
       StructType structType = (StructType) dataType;
       if (readConfig.inferSchemaMapType()
           && structType.fields().length >= readConfig.getInferSchemaMapTypeMinimumKeySize()) {
-        DataType valueType =
-            Arrays.stream(structType.fields())
-                .map(StructField::dataType)
-                .reduce(PLACE_HOLDER_DATA_TYPE, (dt1, dt2) -> compatibleType(dt1, dt2, readConfig));
+        DataType valueType = Arrays.stream(structType.fields())
+            .map(StructField::dataType)
+            .reduce(PLACE_HOLDER_DATA_TYPE, (dt1, dt2) -> compatibleType(dt1, dt2, readConfig));
         return DataTypes.createMapType(DataTypes.StringType, valueType, true);
       }
     }
     return dataType;
   }
 
+  /**
+   * Recursive merge that prefers the rhs datatype value over the lhs. For use with partial schema hints.
+   *
+   * @param lhs the left hand side datatype
+   * @param rhs the right hand side datatype
+   * @return the merged original and preferred data type
+   */
+  @VisibleForTesting
+  static DataType rhsPreferredMerge(final DataType lhs, final DataType rhs) {
+
+    // If they are both structs process the fields and merge.
+    if (lhs instanceof StructType && rhs instanceof StructType) {
+      Map<String, StructField> mergedMap = Arrays.stream(((StructType) rhs).fields())
+          .collect(Collectors.toMap(StructField::name, f -> f));
+
+      for (StructField f : ((StructType) lhs).fields()) {
+        if (!mergedMap.containsKey(f.name())) {
+          mergedMap.put(f.name(), f);
+        } else {
+          // Merge datatypes
+          mergedMap.put(
+              f.name(),
+              new StructField(
+                  f.name(),
+                  rhsPreferredMerge(f.dataType(), mergedMap.get(f.name()).dataType()),
+                  f.nullable(),
+                  f.metadata()));
+        }
+      }
+
+      return new StructType(mergedMap.values().toArray(new StructField[0]));
+    }
+
+    // Otherwise RHS wins.
+    return rhs;
+  }
+
   private static final StructType PLACE_HOLDER_STRUCT_TYPE =
       DataTypes.createStructType(new StructField[0]);
 
-  private static final DataType PLACE_HOLDER_DATA_TYPE =
-      new DataType() {
-        @Override
-        public int defaultSize() {
-          return 0;
-        }
+  private static final DataType PLACE_HOLDER_DATA_TYPE = new DataType() {
+    @Override
+    public int defaultSize() {
+      return 0;
+    }
 
-        @Override
-        public DataType asNullable() {
-          return PLACE_HOLDER_DATA_TYPE;
-        }
-      };
+    @Override
+    public DataType asNullable() {
+      return PLACE_HOLDER_DATA_TYPE;
+    }
+  };
   static final ArrayType PLACE_HOLDER_ARRAY_TYPE =
       DataTypes.createArrayType(PLACE_HOLDER_DATA_TYPE);
 

@@ -21,9 +21,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
-
-import org.apache.spark.sql.execution.streaming.LongOffset;
-
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 
@@ -35,22 +32,22 @@ import org.bson.BsonTimestamp;
 final class MongoMicroBatchInputPartition extends MongoInputPartition {
   private static final long serialVersionUID = 1L;
 
-  private final LongOffset startOffset;
-  private final LongOffset endOffset;
+  private final BsonTimestampOffset startOffset;
+  private final BsonTimestampOffset endOffset;
 
   /**
    * Construct a new instance
    *
    * @param partitionId the id of the partition
    * @param pipeline the pipeline to partition the collection
-   * @param startOffset the start offset in seconds since epoch
-   * @param endOffset the end offset in seconds since epoch
+   * @param startOffset the start bson timestamp offset
+   * @param endOffset the end bson timestamp offset
    */
   MongoMicroBatchInputPartition(
       final int partitionId,
       final List<BsonDocument> pipeline,
-      final LongOffset startOffset,
-      final LongOffset endOffset) {
+      final BsonTimestampOffset startOffset,
+      final BsonTimestampOffset endOffset) {
     super(partitionId, pipeline);
     this.startOffset = startOffset;
     this.endOffset = endOffset;
@@ -58,12 +55,12 @@ final class MongoMicroBatchInputPartition extends MongoInputPartition {
 
   /** @return the bson timestamp at the start offset */
   public BsonTimestamp getStartOffsetTimestamp() {
-    return new BsonTimestamp((int) startOffset.offset(), 0);
+    return startOffset.getBsonTimestamp();
   }
 
   /** @return the bson timestamp at end offset */
   public BsonTimestamp getEndOffsetTimestamp() {
-    return new BsonTimestamp((int) endOffset.offset(), 0);
+    return endOffset.getBsonTimestamp();
   }
 
   @Override

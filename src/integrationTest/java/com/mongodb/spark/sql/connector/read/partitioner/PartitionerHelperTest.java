@@ -17,17 +17,15 @@
 
 package com.mongodb.spark.sql.connector.read.partitioner;
 
+import static com.mongodb.spark.sql.connector.config.MongoConfig.COMMENT_CONFIG;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import org.junit.jupiter.api.Test;
-
-import org.bson.BsonDocument;
-
 import com.mongodb.client.MongoCollection;
-
 import com.mongodb.spark.sql.connector.config.ReadConfig;
 import com.mongodb.spark.sql.connector.mongodb.MongoSparkConnectorTestCase;
+import org.bson.BsonDocument;
+import org.junit.jupiter.api.Test;
 
 public class PartitionerHelperTest extends MongoSparkConnectorTestCase {
 
@@ -37,11 +35,20 @@ public class PartitionerHelperTest extends MongoSparkConnectorTestCase {
     readConfig.doWithCollection(MongoCollection::drop);
     assertDoesNotThrow(() -> PartitionerHelper.storageStats(readConfig));
 
-    readConfig.doWithCollection(
-        coll -> {
-          coll.insertOne(new BsonDocument());
-          coll.deleteOne(new BsonDocument());
-        });
+    readConfig.doWithCollection(coll -> {
+      coll.insertOne(new BsonDocument());
+      coll.deleteOne(new BsonDocument());
+    });
     assertEquals(0, PartitionerHelper.storageStats(readConfig).getNumber("size").intValue());
+  }
+
+  @Test
+  void shouldLogCommentsInProfilerLogs() {
+    ReadConfig readConfig = getMongoConfig().toReadConfig();
+    loadSampleData(50, 1, readConfig);
+
+    ReadConfig configWithComment = readConfig.withOption(COMMENT_CONFIG, TEST_COMMENT);
+    assertCommentsInProfile(
+        () -> PartitionerHelper.storageStats(configWithComment), configWithComment);
   }
 }

@@ -20,21 +20,22 @@ package com.mongodb.spark.sql.connector.config;
 import static java.lang.String.format;
 import static java.util.stream.Collectors.toList;
 
+import com.mongodb.ConnectionString;
+import com.mongodb.MongoNamespace;
+import com.mongodb.spark.sql.connector.assertions.Assertions;
+import com.mongodb.spark.sql.connector.connection.DefaultMongoClientFactory;
+import com.mongodb.spark.sql.connector.exceptions.ConfigException;
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
-
+import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.WriteBuilder;
+import org.bson.BsonString;
 import org.jetbrains.annotations.ApiStatus;
-
-import com.mongodb.ConnectionString;
-import com.mongodb.MongoNamespace;
-
-import com.mongodb.spark.sql.connector.assertions.Assertions;
-import com.mongodb.spark.sql.connector.connection.DefaultMongoClientFactory;
-import com.mongodb.spark.sql.connector.exceptions.ConfigException;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * The MongoConfig interface.
@@ -176,12 +177,56 @@ public interface MongoConfig extends Serializable {
 
   String VALIDATION_ACTION_DEFAULT = "error";
 
+  // This documentation links to `WriteBuilder` instead of `Write`
+  // because `Write` was added in spark-catalyst 3.2.0, and we must support 3.1.2.
   /**
-   * The collection name config
+   * A configuration of the set of collections for {@linkplain WriteBuilder writing} to / {@linkplain Scan scanning} from.
+   * When configuring a {@linkplain WriteBuilder write}, only a single collection name is supported.
+   * When configuring a {@linkplain Scan scan},
+   * the following {@linkplain CollectionsConfig.Type configuration types} are supported:
+   * <ul>
+   *     <li>
+   *     A {@linkplain CollectionsConfig.Type#SINGLE single} collection name.</li>
+   *     <li>
+   *     {@linkplain CollectionsConfig.Type#MULTIPLE Multiple} collection names separated with comma ({@code ','}).
+   *     For example, {@code "collectionA,collectionB"}.
+   *     Note how the values are separated only with comma, and there is no space ({@code ' '}) accompanying it.
+   *     Specifying a space makes it part of a collection name:
+   *     {@code "collectionA, collectionB"}---collections {@code "collectionA"} and {@code " collectionB"}.</li>
+   *     <li>
+   *     {@linkplain CollectionsConfig.Type#ALL All} collections in the {@linkplain #getDatabaseName() database},
+   *     in which case one must specify a string consisting of a single asterisk ({@code '*'}).</li>
+   * </ul>
+   * Note that if a collection name contains comma ({@code ','}), reverse solidus ({@code '\'}), or starts with asterisk ({@code '*'}),
+   * such a character must be escaped with reverse solidus ({@code '\'}). Examples:
+   * <ul>
+   *     <li>
+   *     {@code "mass\, kg"}---a single collection named {@code "mass, kg"}.</li>
+   *     <li>
+   *     {@code "\*"}---a single collection named {@code "*"}.</li>
+   *     <li>
+   *     {@code "\\"}---a single collection named {@code "\"}.
+   *     Note that if the value is specified as a string literal in Java code, then each reverse solidus has to be further escaped,
+   *     leading to having to specify {@code "\\\\"}.</li>
+   * </ul>
    *
    * <p>{@value}
    */
   String COLLECTION_NAME_CONFIG = "collection";
+
+  /**
+   * Add a comment to mongodb operations
+   *
+   * <p>Allows debugging and profiling queries from the connector.
+   *
+   * <p>{@value}
+   *
+   * <p>See: <a
+   * href="https://www.mongodb.com/docs/current/reference/operator/query/comment/">$comment</a>
+   *
+   * <p>Note: Requires MongoDB 4.6+
+   */
+  String COMMENT_CONFIG = "comment";
 
   /** @return the options for this MongoConfig instance */
   Map<String, String> getOptions();
@@ -215,7 +260,12 @@ public interface MongoConfig extends Serializable {
     return new ConnectionString(getOrDefault(CONNECTION_STRING_CONFIG, CONNECTION_STRING_DEFAULT));
   }
 
-  /** @return the namespace related to this config */
+  /**
+   * @return the namespace related to this config
+   * @throws ConfigException
+   * If either {@linkplain CollectionsConfig.Type#MULTIPLE multiple} or {@linkplain CollectionsConfig.Type#ALL all}
+   * collections are {@linkplain ReadConfig#getCollectionsConfig() configured} to be {@linkplain Scan scanned}.
+   */
   default MongoNamespace getNamespace() {
     return new MongoNamespace(getDatabaseName(), getCollectionName());
   }
@@ -262,13 +312,11 @@ public interface MongoConfig extends Serializable {
     Assertions.ensureState(
         () -> prefix.endsWith("."),
         () -> format("Invalid configuration prefix `%s`, it must end with a '.'", prefix));
-    return MongoConfig.createConfig(
-        getOptions().entrySet().stream()
-            .filter(
-                e ->
-                    e.getKey().toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT)))
-            .collect(
-                Collectors.toMap(e -> e.getKey().substring(prefix.length()), Map.Entry::getValue)));
+    return MongoConfig.createConfig(getOptions().entrySet().stream()
+        .filter(
+            e -> e.getKey().toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT)))
+        .collect(
+            Collectors.toMap(e -> e.getKey().substring(prefix.length()), Map.Entry::getValue)));
   }
 
   /**
@@ -403,5 +451,11 @@ public interface MongoConfig extends Serializable {
     return value == null
         ? defaultValue
         : Arrays.stream(value.split(",")).map(String::trim).collect(toList());
+  }
+
+  /** @return the comment to be associated with an operation or null if not set */
+  @Nullable
+  default BsonString getComment() {
+    return containsKey(COMMENT_CONFIG) ? new BsonString(get(COMMENT_CONFIG)) : null;
   }
 }

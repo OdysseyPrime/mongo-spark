@@ -17,13 +17,26 @@
 
 package com.mongodb.spark.sql.connector.assertions;
 
+import com.mongodb.spark.sql.connector.exceptions.ConfigException;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
-import com.mongodb.spark.sql.connector.exceptions.ConfigException;
-
 /** Assertions to validate inputs */
 public final class Assertions {
+
+  /**
+   * Asserts is true
+   *
+   * @param assertionCheck the supplier of the assertion check
+   * @param errorMessageSupplier the supplier of the error message if the predicate
+   * @throws AssertionError if the state check fails
+   */
+  public static void assertTrue(
+      final Supplier<Boolean> assertionCheck, final Supplier<String> errorMessageSupplier) {
+    if (!assertionCheck.get()) {
+      throw new AssertionError(errorMessageSupplier.get());
+    }
+  }
 
   /**
    * Ensures the validity of state

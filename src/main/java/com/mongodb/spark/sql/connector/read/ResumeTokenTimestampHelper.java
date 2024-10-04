@@ -16,19 +16,22 @@
  */
 package com.mongodb.spark.sql.connector.read;
 
+import com.mongodb.spark.sql.connector.exceptions.MongoSparkException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 import org.bson.BsonValue;
 
-import com.mongodb.spark.sql.connector.exceptions.MongoSparkException;
-
 final class ResumeTokenTimestampHelper {
 
   /**
-   * The resume token has the following structure:
+   * Returns the BsonTimestamp from a resume token.
+   *
+   * <p>Handles server based resume tokens or approximated Bson documents with a `_data` field that
+   * contains a BsonTimestamp.
+   *
+   * <p>Server based resume tokens have the following structure:
    *
    * <p>1. It's a document containing a single field named "_data" whose value is a string
    *
@@ -53,6 +56,10 @@ final class ResumeTokenTimestampHelper {
     }
 
     BsonValue data = resumeToken.get("_data");
+    if (data.isTimestamp()) {
+      return data.asTimestamp();
+    }
+
     if (!data.isString()) {
       throw new MongoSparkException(
           "Invalid resume token, expected string value for `_data` field, but found: "
@@ -78,10 +85,8 @@ final class ResumeTokenTimestampHelper {
     int len = hexString.length();
     byte[] bytes = new byte[len / 2];
     for (int i = 0; i < len; i += 2) {
-      bytes[i / 2] =
-          (byte)
-              ((Character.digit(hexString.charAt(i), 16) << 4)
-                  + Character.digit(hexString.charAt(i + 1), 16));
+      bytes[i / 2] = (byte) ((Character.digit(hexString.charAt(i), 16) << 4)
+          + Character.digit(hexString.charAt(i + 1), 16));
     }
     return bytes;
   }

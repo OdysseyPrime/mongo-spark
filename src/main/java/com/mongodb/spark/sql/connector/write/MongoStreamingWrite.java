@@ -21,6 +21,13 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.CreateCollectionOptions;
 import com.mongodb.spark.sql.connector.config.WriteConfig;
 import com.mongodb.spark.sql.connector.exceptions.DataException;
+import static java.lang.String.format;
+
+import com.mongodb.client.MongoCollection;
+import com.mongodb.spark.sql.connector.config.WriteConfig;
+import com.mongodb.spark.sql.connector.exceptions.DataException;
+import java.util.Arrays;
+import java.util.Objects;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -101,9 +108,8 @@ final class MongoStreamingWrite implements StreamingWrite {
   @Override
   public void abort(final long epochId, final WriterCommitMessage[] messages) {
     long tasksCompleted = Arrays.stream(messages).filter(Objects::nonNull).count();
-    throw new DataException(
-        format(
-            "Write aborted for: %s. %s/%s tasks completed. EpochId: %s",
-            info.queryId(), tasksCompleted, messages.length, epochId));
+    throw new DataException(format(
+        "Write aborted for: %s. %s/%s tasks completed. EpochId: %s",
+        info.queryId(), tasksCompleted, messages.length, epochId));
   }
 }

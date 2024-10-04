@@ -17,10 +17,18 @@
 
 package com.mongodb.spark.sql.connector.read;
 
+import static com.mongodb.spark.sql.connector.schema.RowToBsonDocumentConverter.createObjectToBsonValue;
 import static java.lang.String.format;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 
+import com.mongodb.client.model.Aggregates;
+import com.mongodb.client.model.Filters;
+import com.mongodb.spark.sql.connector.assertions.Assertions;
+import com.mongodb.spark.sql.connector.config.MongoConfig;
+import com.mongodb.spark.sql.connector.config.ReadConfig;
+import com.mongodb.spark.sql.connector.config.WriteConfig;
+import com.mongodb.spark.sql.connector.schema.RowToBsonDocumentConverter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -28,7 +36,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
-
+import org.apache.spark.sql.Column;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.ScanBuilder;
@@ -53,27 +61,17 @@ import org.apache.spark.sql.sources.StringStartsWith;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.jetbrains.annotations.ApiStatus;
-import org.jetbrains.annotations.Nullable;
-
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
 import org.bson.conversions.Bson;
-
-import com.mongodb.client.model.Aggregates;
-import com.mongodb.client.model.Filters;
-
-import com.mongodb.spark.sql.connector.assertions.Assertions;
-import com.mongodb.spark.sql.connector.config.MongoConfig;
-import com.mongodb.spark.sql.connector.config.ReadConfig;
-import com.mongodb.spark.sql.connector.schema.RowToBsonDocumentConverter;
+import org.jetbrains.annotations.ApiStatus;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.VisibleForTesting;
 
 /** A builder for a {@link MongoScan}. */
 @ApiStatus.Internal
 public final class MongoScanBuilder
     implements ScanBuilder, SupportsPushDownFilters, SupportsPushDownRequiredColumns {
-  private static final RowToBsonDocumentConverter CONVERTER =
-      new RowToBsonDocumentConverter(new StructType(), false);
   private final StructType schema;
   private final ReadConfig readConfig;
   private final boolean isCaseSensitive;
@@ -91,10 +89,9 @@ public final class MongoScanBuilder
     this.schema = schema;
     this.readConfig = readConfig;
     this.prunedSchema = schema;
-    this.isCaseSensitive =
-        SparkSession.getActiveSession()
-            .map(s -> s.sessionState().conf().caseSensitiveAnalysis())
-            .getOrElse(() -> false);
+    this.isCaseSensitive = SparkSession.getActiveSession()
+        .map(s -> s.sessionState().conf().caseSensitiveAnalysis())
+        .getOrElse(() -> false);
     this.datasetAggregationPipeline = emptyList();
     this.pushedFilters = new Filter[0];
   }
@@ -106,12 +103,11 @@ public final class MongoScanBuilder
     scanAggregationPipeline.addAll(readConfig.getAggregationPipeline());
     scanAggregationPipeline.addAll(datasetAggregationPipeline);
 
-    ReadConfig scanReadConfig =
-        readConfig.withOption(
-            MongoConfig.READ_PREFIX + ReadConfig.AGGREGATION_PIPELINE_CONFIG,
-            scanAggregationPipeline.stream()
-                .map(BsonDocument::toJson)
-                .collect(Collectors.joining(",", "[", "]")));
+    ReadConfig scanReadConfig = readConfig.withOption(
+        MongoConfig.READ_PREFIX + ReadConfig.AGGREGATION_PIPELINE_CONFIG,
+        scanAggregationPipeline.stream()
+            .map(BsonDocument::toJson)
+            .collect(Collectors.joining(",", "[", "]")));
     return new MongoScan(prunedSchema, scanReadConfig);
   }
 
@@ -129,21 +125,16 @@ public final class MongoScanBuilder
     List<FilterAndPipelineStage> processed = new ArrayList<>();
     // Arrays.stream(filters).map(this::processFilter).collect(Collectors.toList())
 
-    List<FilterAndPipelineStage> withPipelines =
-        processed.stream()
-            .filter(FilterAndPipelineStage::hasPipelineStage)
-            .collect(Collectors.toList());
+    List<FilterAndPipelineStage> withPipelines = processed.stream()
+        .filter(FilterAndPipelineStage::hasPipelineStage)
+        .collect(Collectors.toList());
 
-    datasetAggregationPipeline =
-        withPipelines.isEmpty()
-            ? emptyList()
-            : singletonList(
-                Aggregates.match(
-                        Filters.and(
-                            withPipelines.stream()
-                                .map(FilterAndPipelineStage::getPipelineStage)
-                                .collect(Collectors.toList())))
-                    .toBsonDocument());
+    datasetAggregationPipeline = withPipelines.isEmpty()
+        ? emptyList()
+        : singletonList(Aggregates.match(Filters.and(withPipelines.stream()
+                .map(FilterAndPipelineStage::getPipelineStage)
+                .collect(Collectors.toList())))
+            .toBsonDocument());
     pushedFilters =
         withPipelines.stream().map(FilterAndPipelineStage::getFilter).toArray(Filter[]::new);
 
@@ -164,10 +155,9 @@ public final class MongoScanBuilder
   public void pruneColumns(final StructType requiredSchema) {
     Set<String> requiredColumns =
         Arrays.stream(requiredSchema.fields()).map(this::getColumnName).collect(Collectors.toSet());
-    StructField[] fields =
-        Arrays.stream(schema.fields())
-            .filter(f -> requiredColumns.contains(getColumnName(f)))
-            .toArray(StructField[]::new);
+    StructField[] fields = Arrays.stream(schema.fields())
+        .filter(f -> requiredColumns.contains(getColumnName(f)))
+        .toArray(StructField[]::new);
     prunedSchema = new StructType(fields);
   }
 
@@ -197,66 +187,74 @@ public final class MongoScanBuilder
       }
     } else if (filter instanceof EqualNullSafe) {
       EqualNullSafe equalNullSafe = (EqualNullSafe) filter;
+      String fieldName = unquoteFieldName(equalNullSafe.attribute());
       return new FilterAndPipelineStage(
           filter,
-          getBsonValue(equalNullSafe.attribute(), equalNullSafe.value())
-              .map(bsonValue -> Filters.eq(equalNullSafe.attribute(), bsonValue))
+          getBsonValue(fieldName, equalNullSafe.value())
+              .map(bsonValue -> Filters.eq(fieldName, bsonValue))
               .orElse(null));
     } else if (filter instanceof EqualTo) {
       EqualTo equalTo = (EqualTo) filter;
+      String fieldName = unquoteFieldName(equalTo.attribute());
       return new FilterAndPipelineStage(
           filter,
-          getBsonValue(equalTo.attribute(), equalTo.value())
-              .map(bsonValue -> Filters.eq(equalTo.attribute(), bsonValue))
+          getBsonValue(fieldName, equalTo.value())
+              .map(bsonValue -> Filters.eq(fieldName, bsonValue))
               .orElse(null));
     } else if (filter instanceof GreaterThan) {
       GreaterThan greaterThan = (GreaterThan) filter;
+      String fieldName = unquoteFieldName(greaterThan.attribute());
       return new FilterAndPipelineStage(
           filter,
-          getBsonValue(greaterThan.attribute(), greaterThan.value())
-              .map(bsonValue -> Filters.gt(greaterThan.attribute(), bsonValue))
+          getBsonValue(fieldName, greaterThan.value())
+              .map(bsonValue -> Filters.gt(fieldName, bsonValue))
               .orElse(null));
     } else if (filter instanceof GreaterThanOrEqual) {
       GreaterThanOrEqual greaterThanOrEqual = (GreaterThanOrEqual) filter;
+      String fieldName = unquoteFieldName(greaterThanOrEqual.attribute());
       return new FilterAndPipelineStage(
           filter,
-          getBsonValue(greaterThanOrEqual.attribute(), greaterThanOrEqual.value())
-              .map(bsonValue -> Filters.gte(greaterThanOrEqual.attribute(), bsonValue))
+          getBsonValue(fieldName, greaterThanOrEqual.value())
+              .map(bsonValue -> Filters.gte(fieldName, bsonValue))
               .orElse(null));
     } else if (filter instanceof In) {
       In inFilter = (In) filter;
-      List<BsonValue> values =
-          Arrays.stream(inFilter.values())
-              .map(v -> getBsonValue(inFilter.attribute(), v))
-              .filter(Optional::isPresent)
-              .map(Optional::get)
-              .collect(Collectors.toList());
+      String fieldName = unquoteFieldName(inFilter.attribute());
+      List<BsonValue> values = Arrays.stream(inFilter.values())
+          .map(v -> getBsonValue(fieldName, v))
+          .filter(Optional::isPresent)
+          .map(Optional::get)
+          .collect(Collectors.toList());
 
       // Ensure all values were matched otherwise leave to Spark to filter.
       Bson pipelineStage = null;
       if (values.size() == inFilter.values().length) {
-        pipelineStage = Filters.in(inFilter.attribute(), values);
+        pipelineStage = Filters.in(fieldName, values);
       }
       return new FilterAndPipelineStage(filter, pipelineStage);
     } else if (filter instanceof IsNull) {
       IsNull isNullFilter = (IsNull) filter;
-      return new FilterAndPipelineStage(filter, Filters.eq(isNullFilter.attribute(), null));
+      String fieldName = unquoteFieldName(isNullFilter.attribute());
+      return new FilterAndPipelineStage(filter, Filters.eq(fieldName, null));
     } else if (filter instanceof IsNotNull) {
       IsNotNull isNotNullFilter = (IsNotNull) filter;
-      return new FilterAndPipelineStage(filter, Filters.exists(isNotNullFilter.attribute(), true));
+      String fieldName = unquoteFieldName(isNotNullFilter.attribute());
+      return new FilterAndPipelineStage(filter, Filters.ne(fieldName, null));
     } else if (filter instanceof LessThan) {
       LessThan lessThan = (LessThan) filter;
+      String fieldName = unquoteFieldName(lessThan.attribute());
       return new FilterAndPipelineStage(
           filter,
-          getBsonValue(lessThan.attribute(), lessThan.value())
-              .map(bsonValue -> Filters.lt(lessThan.attribute(), bsonValue))
+          getBsonValue(fieldName, lessThan.value())
+              .map(bsonValue -> Filters.lt(fieldName, bsonValue))
               .orElse(null));
     } else if (filter instanceof LessThanOrEqual) {
       LessThanOrEqual lessThanOrEqual = (LessThanOrEqual) filter;
+      String fieldName = unquoteFieldName(lessThanOrEqual.attribute());
       return new FilterAndPipelineStage(
           filter,
-          getBsonValue(lessThanOrEqual.attribute(), lessThanOrEqual.value())
-              .map(bsonValue -> Filters.lte(lessThanOrEqual.attribute(), bsonValue))
+          getBsonValue(fieldName, lessThanOrEqual.value())
+              .map(bsonValue -> Filters.lte(fieldName, bsonValue))
               .orElse(null));
     } else if (filter instanceof Not) {
       Not notFilter = (Not) filter;
@@ -274,21 +272,30 @@ public final class MongoScanBuilder
       }
     } else if (filter instanceof StringContains) {
       StringContains stringContains = (StringContains) filter;
+      String fieldName = unquoteFieldName(stringContains.attribute());
       return new FilterAndPipelineStage(
-          filter,
-          Filters.regex(stringContains.attribute(), format(".*%s.*", stringContains.value())));
+          filter, Filters.regex(fieldName, format(".*%s.*", stringContains.value())));
     } else if (filter instanceof StringEndsWith) {
       StringEndsWith stringEndsWith = (StringEndsWith) filter;
+      String fieldName = unquoteFieldName(stringEndsWith.attribute());
       return new FilterAndPipelineStage(
-          filter,
-          Filters.regex(stringEndsWith.attribute(), format(".*%s$", stringEndsWith.value())));
+          filter, Filters.regex(fieldName, format(".*%s$", stringEndsWith.value())));
     } else if (filter instanceof StringStartsWith) {
       StringStartsWith stringStartsWith = (StringStartsWith) filter;
+      String fieldName = unquoteFieldName(stringStartsWith.attribute());
       return new FilterAndPipelineStage(
-          filter,
-          Filters.regex(stringStartsWith.attribute(), format("^%s.*", stringStartsWith.value())));
+          filter, Filters.regex(fieldName, format("^%s.*", stringStartsWith.value())));
     }
     return new FilterAndPipelineStage(filter, null);
+  }
+
+  @VisibleForTesting
+  static String unquoteFieldName(final String fieldName) {
+    // Spark automatically escapes hyphenated names using backticks
+    if (fieldName.contains("`")) {
+      return new Column(fieldName).toString();
+    }
+    return fieldName;
   }
 
   private Optional<BsonValue> getBsonValue(final String fieldName, final Object value) {
@@ -303,7 +310,9 @@ public final class MongoScanBuilder
           localSchema = (StructType) localField.dataType();
         }
       }
-      return Optional.of(CONVERTER.toBsonValue(localDataType, value));
+      RowToBsonDocumentConverter.ObjectToBsonValue objectToBsonValue =
+          createObjectToBsonValue(localDataType, WriteConfig.ConvertJson.FALSE, false);
+      return Optional.of(objectToBsonValue.apply(value));
     } catch (Exception e) {
       // ignore
       return Optional.empty();

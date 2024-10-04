@@ -17,19 +17,6 @@
 
 package com.mongodb.spark.sql.connector.read;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.function.Function;
-
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.connector.read.streaming.ContinuousPartitionReader;
-import org.apache.spark.sql.connector.read.streaming.PartitionOffset;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.bson.BsonDocument;
-import org.bson.Document;
-
 import com.mongodb.MongoException;
 import com.mongodb.MongoInterruptedException;
 import com.mongodb.client.ChangeStreamIterable;
@@ -37,11 +24,23 @@ import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
-
 import com.mongodb.spark.sql.connector.assertions.Assertions;
+import com.mongodb.spark.sql.connector.config.CollectionsConfig;
 import com.mongodb.spark.sql.connector.config.ReadConfig;
 import com.mongodb.spark.sql.connector.exceptions.MongoSparkException;
 import com.mongodb.spark.sql.connector.schema.BsonDocumentToRowConverter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.read.streaming.ContinuousPartitionReader;
+import org.apache.spark.sql.connector.read.streaming.PartitionOffset;
+import org.bson.BsonDocument;
+import org.bson.Document;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A partition reader returned by {@link
@@ -57,8 +56,7 @@ final class MongoContinuousPartitionReader implements ContinuousPartitionReader<
   private final MongoInputPartition partition;
   private final BsonDocumentToRowConverter bsonDocumentToRowConverter;
   private final ReadConfig readConfig;
-
-  private ResumeTokenPartitionOffset lastOffset;
+  private MongoContinuousInputPartitionOffset lastOffset;
   private InternalRow currentRow;
   private boolean closed = false;
   private MongoClient mongoClient;
@@ -81,7 +79,7 @@ final class MongoContinuousPartitionReader implements ContinuousPartitionReader<
 
     this.readConfig = readConfig;
     this.currentRow = null;
-    this.lastOffset = partition.getResumeTokenPartitionOffset();
+    this.lastOffset = partition.getPartitionOffset();
 
     LOGGER.debug(
         "Creating partition reader for: Partition: {} with Schema: {}",
@@ -133,27 +131,47 @@ final class MongoContinuousPartitionReader implements ContinuousPartitionReader<
     }
   }
 
+  /**
+   * Used within a loop as continuous streams are required to block until {@code ContinuousPartitionReader#next}
+   * returns a result.
+   *
+   * <p>Ensures the cursor resources are managed correctly in case of error retrieving a result.
+   *
+   * @return true if there is a result available else false
+   */
   private boolean tryNext() {
-    return withCursor(
-        c -> {
-          try {
-            if (c.hasNext()) {
-              BsonDocument next = c.next();
-              lastOffset = new ResumeTokenPartitionOffset(c.getResumeToken());
-              if (readConfig.streamPublishFullDocumentOnly()) {
-                next = next.getDocument(FULL_DOCUMENT, new BsonDocument());
-              }
-              currentRow = bsonDocumentToRowConverter.toInternalRow(next);
-              return true;
-            }
-          } catch (MongoException e) {
-            LOGGER.info(
-                "Trying to get more data from the change stream failed, releasing cursor.", e);
+    return withCursor(cursor -> {
+      try {
+        currentRow = null;
+        BsonDocument next = cursor.tryNext();
+        setLastOffset(cursor.getResumeToken());
+        if (next != null) {
+          if (readConfig.streamPublishFullDocumentOnly()) {
+            next = next.getDocument(FULL_DOCUMENT, new BsonDocument());
           }
-          releaseCursorAndClient();
-          currentRow = null;
-          return false;
-        });
+
+          // If there is a result return it otherwise try again (eg: ReadConfig.dropMalformed())
+          Optional<InternalRow> internalRowOptional =
+              bsonDocumentToRowConverter.toInternalRow(next);
+          if (internalRowOptional.isPresent()) {
+            currentRow = internalRowOptional.get();
+            return true;
+          }
+        }
+        return false;
+      } catch (MongoException e) {
+        LOGGER.info("Trying to get more data from the change stream failed, releasing cursor.", e);
+      }
+      releaseCursorAndClient();
+      currentRow = null;
+      return false;
+    });
+  }
+
+  private void setLastOffset(@Nullable final BsonDocument resumeToken) {
+    if (resumeToken != null) {
+      lastOffset = new MongoContinuousInputPartitionOffset(new ResumeTokenBasedOffset(resumeToken));
+    }
   }
 
   private MongoChangeStreamCursor<BsonDocument> getCursor() {
@@ -166,22 +184,24 @@ final class MongoContinuousPartitionReader implements ContinuousPartitionReader<
         pipeline.add(Aggregates.match(Filters.exists(FULL_DOCUMENT)).toBsonDocument());
       }
       pipeline.addAll(partition.getPipeline());
-
-      ChangeStreamIterable<Document> changeStreamIterable =
-          mongoClient
-              .getDatabase(readConfig.getDatabaseName())
-              .getCollection(readConfig.getCollectionName())
-              .watch(pipeline)
-              .fullDocument(readConfig.getStreamFullDocument());
-
-      if (!lastOffset.getResumeToken().isEmpty()) {
-        changeStreamIterable = changeStreamIterable.startAfter(lastOffset.getResumeToken());
+      ChangeStreamIterable<Document> changeStreamIterable;
+      if (readConfig.getCollectionsConfig().getType() == CollectionsConfig.Type.SINGLE) {
+        changeStreamIterable = mongoClient
+            .getDatabase(readConfig.getDatabaseName())
+            .getCollection(readConfig.getCollectionName())
+            .watch(pipeline);
+      } else {
+        changeStreamIterable =
+            mongoClient.getDatabase(readConfig.getDatabaseName()).watch(pipeline);
       }
+      changeStreamIterable
+          .fullDocument(readConfig.getStreamFullDocument())
+          .comment(readConfig.getComment());
+      changeStreamIterable = lastOffset.applyToChangeStreamIterable(changeStreamIterable);
 
       try {
-        changeStreamCursor =
-            (MongoChangeStreamCursor<BsonDocument>)
-                changeStreamIterable.withDocumentClass(BsonDocument.class).cursor();
+        changeStreamCursor = (MongoChangeStreamCursor<BsonDocument>)
+            changeStreamIterable.withDocumentClass(BsonDocument.class).cursor();
         LOGGER.debug("Opened change stream cursor for partition: {}", partition);
       } catch (RuntimeException e) {
         throw new MongoSparkException("Could not create the change stream cursor.", e);

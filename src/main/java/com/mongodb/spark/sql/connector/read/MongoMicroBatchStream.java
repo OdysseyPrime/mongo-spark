@@ -16,22 +16,22 @@
  */
 package com.mongodb.spark.sql.connector.read;
 
-import static com.mongodb.spark.sql.connector.read.MongoInputPartitionHelper.generatePipeline;
-
-import java.time.Instant;
-
-import org.apache.spark.sql.connector.read.InputPartition;
-import org.apache.spark.sql.connector.read.PartitionReaderFactory;
-import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
-import org.apache.spark.sql.connector.read.streaming.Offset;
-import org.apache.spark.sql.execution.streaming.LongOffset;
-import org.apache.spark.sql.types.StructType;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static com.mongodb.spark.sql.connector.read.MongoInputPartitionHelper.generateMicroBatchPartitions;
 
 import com.mongodb.spark.sql.connector.assertions.Assertions;
 import com.mongodb.spark.sql.connector.config.ReadConfig;
 import com.mongodb.spark.sql.connector.schema.BsonDocumentToRowConverter;
+import com.mongodb.spark.sql.connector.schema.InferSchema;
+import java.time.Instant;
+import org.apache.spark.SparkContext;
+import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReaderFactory;
+import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
+import org.apache.spark.sql.connector.read.streaming.Offset;
+import org.apache.spark.sql.types.StructType;
+import org.bson.BsonTimestamp;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * MongoMicroBatchStream defines how to read a stream of data from MongoDB.
@@ -48,11 +48,10 @@ final class MongoMicroBatchStream implements MicroBatchStream {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(MongoMicroBatchStream.class);
   private final StructType schema;
+  private final MongoOffsetStore mongoOffsetStore;
   private final ReadConfig readConfig;
   private final BsonDocumentToRowConverter bsonDocumentToRowConverter;
   private volatile Long lastTime = Instant.now().getEpochSecond();
-
-  private int partitionId;
 
   /**
    * Construct a new instance
@@ -60,15 +59,21 @@ final class MongoMicroBatchStream implements MicroBatchStream {
    * @param schema the schema for the data
    * @param readConfig the read configuration
    */
-  MongoMicroBatchStream(final StructType schema, final ReadConfig readConfig) {
+  MongoMicroBatchStream(
+      final StructType schema, final String checkpointLocation, final ReadConfig readConfig) {
     Assertions.validateConfig(
         schema,
-        (s) -> !s.isEmpty(),
-        () -> "Mongo micro batch streams require a schema to be defined");
+        (s) -> !s.isEmpty()
+            && (!InferSchema.isInferred(s) || readConfig.streamPublishFullDocumentOnly()),
+        () ->
+            "Mongo micro batch streams require a schema to be explicitly defined, unless using publish full document only.");
     this.schema = schema;
+    this.mongoOffsetStore = new MongoOffsetStore(
+        SparkContext.getOrCreate().hadoopConfiguration(),
+        checkpointLocation,
+        MongoOffset.getInitialOffset(readConfig));
     this.readConfig = readConfig;
-    this.bsonDocumentToRowConverter =
-        new BsonDocumentToRowConverter(schema, readConfig.outputExtendedJson());
+    this.bsonDocumentToRowConverter = new BsonDocumentToRowConverter(schema, readConfig);
   }
 
   @Override
@@ -77,15 +82,13 @@ final class MongoMicroBatchStream implements MicroBatchStream {
     if (lastTime < now) {
       lastTime = now;
     }
-    return new LongOffset(lastTime);
+    return new BsonTimestampOffset(new BsonTimestamp(lastTime.intValue(), 0));
   }
 
   @Override
   public InputPartition[] planInputPartitions(final Offset start, final Offset end) {
-    return new InputPartition[] {
-      new MongoMicroBatchInputPartition(
-          partitionId++, generatePipeline(schema, readConfig), (LongOffset) start, (LongOffset) end)
-    };
+    return generateMicroBatchPartitions(
+        schema, readConfig, (BsonTimestampOffset) start, (BsonTimestampOffset) end);
   }
 
   @Override
@@ -95,17 +98,18 @@ final class MongoMicroBatchStream implements MicroBatchStream {
 
   @Override
   public Offset initialOffset() {
-    return new LongOffset(-1);
+    return mongoOffsetStore.initialOffset();
   }
 
   @Override
   public Offset deserializeOffset(final String json) {
-    return new LongOffset(Long.parseLong(json));
+    return MongoOffset.fromJson(json);
   }
 
   @Override
   public void commit(final Offset end) {
     LOGGER.info("MicroBatchStream commit: {}", end);
+    mongoOffsetStore.updateOffset((MongoOffset) end);
   }
 
   @Override

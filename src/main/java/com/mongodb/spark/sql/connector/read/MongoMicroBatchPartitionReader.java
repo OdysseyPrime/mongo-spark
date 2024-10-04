@@ -19,27 +19,25 @@ package com.mongodb.spark.sql.connector.read;
 
 import static com.mongodb.spark.sql.connector.read.ResumeTokenTimestampHelper.getTimestamp;
 
-import java.util.ArrayList;
-import java.util.List;
-
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.connector.read.PartitionReader;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.bson.BsonDocument;
-import org.bson.Document;
-
 import com.mongodb.client.ChangeStreamIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
-
 import com.mongodb.spark.sql.connector.assertions.Assertions;
+import com.mongodb.spark.sql.connector.config.CollectionsConfig;
 import com.mongodb.spark.sql.connector.config.ReadConfig;
 import com.mongodb.spark.sql.connector.exceptions.MongoSparkException;
 import com.mongodb.spark.sql.connector.schema.BsonDocumentToRowConverter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.bson.BsonDocument;
+import org.bson.Document;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A partition reader returned by {@link
@@ -101,28 +99,33 @@ final class MongoMicroBatchPartitionReader implements PartitionReader<InternalRo
     Assertions.ensureState(() -> !closed, () -> "Cannot call next() on a closed PartitionReader.");
 
     MongoChangeStreamCursor<BsonDocument> cursor = getCursor();
-    BsonDocument cursorNext;
+    BsonDocument next;
 
     do {
       try {
-        cursorNext = cursor.tryNext();
+        currentRow = null;
+        next = cursor.tryNext();
+        if (next != null) {
+          if (readConfig.streamPublishFullDocumentOnly()) {
+            next = next.getDocument(FULL_DOCUMENT, new BsonDocument());
+          }
+
+          // If there is a result return it otherwise try again (eg: ReadConfig.dropMalformed())
+          Optional<InternalRow> internalRowOptional =
+              bsonDocumentToRowConverter.toInternalRow(next);
+          if (internalRowOptional.isPresent()) {
+            currentRow = internalRowOptional.get();
+            return true;
+          }
+        }
       } catch (RuntimeException e) {
         throw new MongoSparkException("Calling `cursor.tryNext()` errored.", e);
       }
-    } while (cursorNext == null
-        && cursor.getServerCursor() != null
+    } while (cursor.getServerCursor() != null
         && (cursor.getResumeToken() == null
             || getTimestamp(cursor.getResumeToken()).compareTo(partition.getEndOffsetTimestamp())
-                <= 0));
-
-    boolean hasNext = cursorNext != null;
-    if (hasNext) {
-      if (readConfig.streamPublishFullDocumentOnly()) {
-        cursorNext = cursorNext.getDocument(FULL_DOCUMENT, new BsonDocument());
-      }
-      currentRow = bsonDocumentToRowConverter.toInternalRow(cursorNext);
-    }
-    return hasNext;
+                < 0));
+    return false;
   }
 
   /** Return the current record. This method should return same value until `next` is called. */
@@ -164,29 +167,32 @@ final class MongoMicroBatchPartitionReader implements PartitionReader<InternalRo
   private MongoChangeStreamCursor<BsonDocument> getCursor() {
     if (changeStreamCursor == null) {
       List<BsonDocument> pipeline = new ArrayList<>();
-      pipeline.add(
-          Aggregates.match(Filters.lt("clusterTime", partition.getEndOffsetTimestamp()))
-              .toBsonDocument());
+      pipeline.add(Aggregates.match(Filters.lt("clusterTime", partition.getEndOffsetTimestamp()))
+          .toBsonDocument());
       if (readConfig.streamPublishFullDocumentOnly()) {
         pipeline.add(Aggregates.match(Filters.exists(FULL_DOCUMENT)).toBsonDocument());
       }
       pipeline.addAll(partition.getPipeline());
-
-      ChangeStreamIterable<Document> changeStreamIterable =
-          mongoClient
-              .getDatabase(readConfig.getDatabaseName())
-              .getCollection(readConfig.getCollectionName())
-              .watch(pipeline)
-              .fullDocument(readConfig.getStreamFullDocument());
-
+      ChangeStreamIterable<Document> changeStreamIterable;
+      if (readConfig.getCollectionsConfig().getType() == CollectionsConfig.Type.SINGLE) {
+        changeStreamIterable = mongoClient
+            .getDatabase(readConfig.getDatabaseName())
+            .getCollection(readConfig.getCollectionName())
+            .watch(pipeline);
+      } else {
+        changeStreamIterable =
+            mongoClient.getDatabase(readConfig.getDatabaseName()).watch(pipeline);
+      }
+      changeStreamIterable
+          .fullDocument(readConfig.getStreamFullDocument())
+          .comment(readConfig.getComment());
       if (partition.getStartOffsetTimestamp().getTime() >= 0) {
         changeStreamIterable.startAtOperationTime(partition.getStartOffsetTimestamp());
       }
 
       try {
-        changeStreamCursor =
-            (MongoChangeStreamCursor<BsonDocument>)
-                changeStreamIterable.withDocumentClass(BsonDocument.class).cursor();
+        changeStreamCursor = (MongoChangeStreamCursor<BsonDocument>)
+            changeStreamIterable.withDocumentClass(BsonDocument.class).cursor();
         LOGGER.debug("Opened change stream cursor for partition: {}", partition);
       } catch (RuntimeException e) {
         throw new MongoSparkException("Could not create the change stream cursor.", e);

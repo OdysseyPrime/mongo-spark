@@ -17,17 +17,14 @@
 
 package com.mongodb.spark.sql.connector.connection;
 
-import java.util.Objects;
-
-import org.jetbrains.annotations.ApiStatus;
-
 import com.mongodb.MongoDriverInformation;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
-
 import com.mongodb.spark.connector.Versions;
 import com.mongodb.spark.sql.connector.config.MongoConfig;
 import com.mongodb.spark.sql.connector.config.ReadConfig;
+import java.util.Objects;
+import org.jetbrains.annotations.ApiStatus;
 
 /** The default MongoClientFactory implementation. */
 @ApiStatus.Internal
@@ -61,24 +58,22 @@ public final class DefaultMongoClientFactory implements MongoClientFactory {
       return false;
     }
     final DefaultMongoClientFactory that = (DefaultMongoClientFactory) o;
-    return config.equals(that.config)
-        && Objects.equals(mongoDriverInformation, that.mongoDriverInformation);
+    return config.equals(that.config);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(config, mongoDriverInformation);
+    return Objects.hash(config);
   }
 
   private static MongoDriverInformation generateMongoDriverInformation(final String configType) {
     return MongoDriverInformation.builder()
         .driverName(Versions.NAME + "|" + configType)
         .driverVersion(Versions.VERSION)
-        .driverPlatform(
-            "Scala/"
-                + scala.util.Properties.versionNumberString()
-                + "/Spark/"
-                + org.apache.spark.package$.MODULE$.SPARK_VERSION())
+        .driverPlatform("Scala/"
+            + scala.util.Properties.versionNumberString()
+            + "/Spark/"
+            + org.apache.spark.package$.MODULE$.SPARK_VERSION())
         .build();
   }
 }

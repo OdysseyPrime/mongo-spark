@@ -17,13 +17,16 @@
 
 package com.mongodb.spark.sql.connector.read;
 
+import static java.lang.String.format;
+
+import com.mongodb.spark.sql.connector.config.CollectionsConfig;
+import com.mongodb.spark.sql.connector.config.ReadConfig;
+import com.mongodb.spark.sql.connector.exceptions.ConfigException;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.streaming.ContinuousStream;
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.types.StructType;
-
-import com.mongodb.spark.sql.connector.config.ReadConfig;
 
 /** A logical representation of MongoDB data source scan. */
 final class MongoScan implements Scan {
@@ -53,12 +56,26 @@ final class MongoScan implements Scan {
   /** A description string of this scan. */
   @Override
   public String description() {
-    return "MongoScan{" + "namespace=" + readConfig.getNamespace().toString() + '}';
+    return "MongoScan{" + "namespaceDescription=" + readConfig.getNamespaceDescription() + '}';
   }
 
-  /** Returns the physical representation of this scan for batch query. */
+  /**
+   * Returns the physical representation of this scan for batch query.
+   * This mode does not support scanning
+   * {@linkplain com.mongodb.spark.sql.connector.config.CollectionsConfig.Type#MULTIPLE multiple} or
+   * {@linkplain com.mongodb.spark.sql.connector.config.CollectionsConfig.Type#ALL all} collections.
+   *
+   * @throws ConfigException
+   * If either {@linkplain CollectionsConfig.Type#MULTIPLE multiple} or {@linkplain CollectionsConfig.Type#ALL all}
+   * collections are {@linkplain ReadConfig#getCollectionsConfig() configured} to be {@linkplain Scan scanned}.
+   */
   @Override
   public Batch toBatch() {
+    if (readConfig.getCollectionsConfig().getType() != CollectionsConfig.Type.SINGLE) {
+      throw new ConfigException(format(
+          "The connector is configured to access %s, which is not supported by batch queries",
+          readConfig.getNamespaceDescription()));
+    }
     return new MongoBatch(schema, readConfig);
   }
 
@@ -70,12 +87,10 @@ final class MongoScan implements Scan {
    *
    * <p>Note: Requires MongoDB 4.2+ To support continuing a change stream after a collection has
    * been dropped.
-   *
-   * @param checkpointLocation check point locations are not supported
    */
   @Override
   public MicroBatchStream toMicroBatchStream(final String checkpointLocation) {
-    return new MongoMicroBatchStream(schema, readConfig);
+    return new MongoMicroBatchStream(schema, checkpointLocation, readConfig);
   }
 
   /**
@@ -86,11 +101,9 @@ final class MongoScan implements Scan {
    *
    * <p>Note: Requires MongoDB 4.2+ To support continuing a change stream after a collection has
    * been dropped.
-   *
-   * @param checkpointLocation check point locations are not supported
    */
   @Override
   public ContinuousStream toContinuousStream(final String checkpointLocation) {
-    return new MongoContinuousStream(schema, readConfig);
+    return new MongoContinuousStream(schema, checkpointLocation, readConfig);
   }
 }

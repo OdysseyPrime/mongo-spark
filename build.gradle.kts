@@ -31,11 +31,11 @@ plugins {
     checkstyle
     id("com.github.gmazzo.buildconfig") version "3.0.2"
     id("com.github.spotbugs") version "4.7.9"
-    id("com.diffplug.spotless") version "6.0.0"
+    id("com.diffplug.spotless") version "6.19.0"
     id("com.github.johnrengelman.shadow") version "7.0.0"
 }
 
-version = "10.1.4"
+version = "10.5.0-SNAPSHOT"
 group = "org.mongodb.spark"
 
 description = "The official MongoDB Apache Spark Connect Connector."
@@ -55,7 +55,7 @@ val sparkVersion = System.getProperty("sparkVersion", "3.5.0")
 
 extra.apply {
     set("annotationsVersion", "22.0.0")
-    set("mongodbDriverVersion", "[4.8.1,4.8.99)")
+    set("mongodbDriverVersion", "[5.1.1,5.1.99)")
     set("sparkVersion", sparkVersion)
     set("scalaVersion", scalaVersion)
 
@@ -103,6 +103,7 @@ dependencies {
 
     // Integration Tests
     testImplementation("org.apache.commons:commons-lang3:${project.extra["commons-lang3"]}")
+    testImplementation("org.jetbrains:annotations:${project.extra["annotationsVersion"]}")
 }
 
 val defaultJdkVersion: Int = 11
@@ -176,7 +177,7 @@ tasks.withType<Test> {
     javaLauncher.set(
         javaToolchains.launcherFor {
             languageVersion.set(JavaLanguageVersion.of(javaVersion))
-        }
+        },
     )
 
     systemProperties(mapOf("org.mongodb.test.uri" to System.getProperty("org.mongodb.test.uri", "")))
@@ -201,7 +202,8 @@ tasks.withType<Test> {
                     | ${r.testCount} tests,
                     | ${r.successfulTestCount} succeeded,
                     | ${r.failedTestCount} failed,
-                    | ${r.skippedTestCount} skipped""".trimMargin().replace("\n", "")
+                    | ${r.skippedTestCount} skipped
+                """.trimMargin().replace("\n", "")
 
                 val border = "=".repeat(resultsSummary.length)
                 logger.lifecycle("\n$border")
@@ -236,7 +238,6 @@ tasks.withType<com.github.spotbugs.snom.SpotBugsTask> {
 // Spotless is used to lint and reformat source files.
 spotless {
     java {
-        googleJavaFormat()
         importOrder("java", "io", "org", "org.bson", "com.mongodb", "com.mongodb.spark", "")
         removeUnusedImports() // removes any unused imports
         trimTrailingWhitespace()
@@ -245,7 +246,7 @@ spotless {
     }
 
     kotlinGradle {
-        ktlint("0.43.0")
+        ktlint()
         trimTrailingWhitespace()
         indentWithSpaces()
         endWithNewline()
@@ -372,7 +373,8 @@ tasks.register("publishArchives") {
                 |$gitDiffNameOnly
                 |
                 | The project version does not match the git tag.
-                |""".trimMargin()
+                |
+            """.trimMargin()
             throw GradleException(cause)
         } else {
             println("Publishing: ${project.name} : $gitVersion")

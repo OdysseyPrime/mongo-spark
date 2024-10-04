@@ -26,18 +26,16 @@ import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.mongodb.WriteConcern;
+import com.mongodb.client.model.changestream.FullDocument;
+import com.mongodb.spark.sql.connector.exceptions.ConfigException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.stream.Stream;
-
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
-
-import com.mongodb.WriteConcern;
-import com.mongodb.client.model.changestream.FullDocument;
-
-import com.mongodb.spark.sql.connector.exceptions.ConfigException;
 
 public class MongoConfigTest {
 
@@ -108,10 +106,9 @@ public class MongoConfigTest {
 
   @Test
   void testMongoConfigWriteConcern() {
-    WriteConfig writeConfig =
-        MongoConfig.createConfig(CONFIG_MAP)
-            .withOption(WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "1")
-            .toWriteConfig();
+    WriteConfig writeConfig = MongoConfig.createConfig(CONFIG_MAP)
+        .withOption(WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "1")
+        .toWriteConfig();
     assertEquals(1, writeConfig.getWriteConcern().getW());
 
     writeConfig =
@@ -122,15 +119,32 @@ public class MongoConfigTest {
         writeConfig.withOption(WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "3");
     assertEquals(3, writeConfig.getWriteConcern().getW());
 
-    writeConfig =
-        writeConfig.withOption(
-            WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "majority");
+    writeConfig = writeConfig.withOption(
+        WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "majority");
     assertEquals(WriteConcern.MAJORITY, writeConfig.getWriteConcern());
 
-    writeConfig =
-        writeConfig.withOption(
-            WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "region1");
+    writeConfig = writeConfig.withOption(
+        WriteConfig.WRITE_PREFIX + WriteConfig.WRITE_CONCERN_W_CONFIG, "region1");
     assertEquals(new WriteConcern("region1"), writeConfig.getWriteConcern());
+  }
+
+  @Test
+  void testWriteConfigConvertJson() {
+    WriteConfig writeConfig = MongoConfig.createConfig(CONFIG_MAP).toWriteConfig();
+    assertEquals(writeConfig.convertJson(), WriteConfig.ConvertJson.FALSE);
+    assertEquals(
+        writeConfig.withOption("convertJson", "False").convertJson(),
+        WriteConfig.ConvertJson.FALSE);
+    assertEquals(
+        writeConfig.withOption("convertJson", "True").convertJson(), WriteConfig.ConvertJson.ANY);
+    assertEquals(
+        writeConfig.withOption("convertJson", "Any").convertJson(), WriteConfig.ConvertJson.ANY);
+    assertEquals(
+        writeConfig.withOption("convertJson", "objectOrArrayOnly").convertJson(),
+        WriteConfig.ConvertJson.OBJECT_OR_ARRAY_ONLY);
+    assertEquals(
+        writeConfig.withOption("convertJson", "OBJECT_OR_ARRAY_ONLY").convertJson(),
+        WriteConfig.ConvertJson.OBJECT_OR_ARRAY_ONLY);
   }
 
   @Test
@@ -220,6 +234,29 @@ public class MongoConfigTest {
     writeConfig = MongoConfig.writeConfig(options);
     assertEquals("overriddenWriteDb", writeConfig.getDatabaseName());
     assertEquals("overriddenWriteColl", writeConfig.getCollectionName());
+
+    // CollectionsConfig.Mode.MULTIPLE
+    options.put(
+        MongoConfig.READ_PREFIX + MongoConfig.COLLECTION_NAME_CONFIG, "readCollA,readCollB");
+    options.put(
+        MongoConfig.WRITE_PREFIX + MongoConfig.COLLECTION_NAME_CONFIG, "writeCollA,writeCollB");
+    assertEquals(
+        CollectionsConfig.parse("readCollA,readCollB"),
+        MongoConfig.readConfig(options).getCollectionsConfig());
+    assertThrows(ConfigException.class, () -> MongoConfig.readConfig(options).getCollectionName());
+    assertThrows(
+        ConfigException.class, () -> MongoConfig.writeConfig(options).getCollectionsConfig());
+    assertThrows(ConfigException.class, () -> MongoConfig.writeConfig(options).getCollectionName());
+
+    // CollectionsConfig.Mode.ALL
+    options.put(MongoConfig.READ_PREFIX + MongoConfig.COLLECTION_NAME_CONFIG, "*");
+    options.put(MongoConfig.WRITE_PREFIX + MongoConfig.COLLECTION_NAME_CONFIG, "*");
+    assertEquals(
+        CollectionsConfig.parse("*"), MongoConfig.readConfig(options).getCollectionsConfig());
+    assertThrows(ConfigException.class, () -> MongoConfig.readConfig(options).getCollectionName());
+    assertThrows(
+        ConfigException.class, () -> MongoConfig.writeConfig(options).getCollectionsConfig());
+    assertThrows(ConfigException.class, () -> MongoConfig.writeConfig(options).getCollectionName());
   }
 
   @ParameterizedTest
@@ -261,11 +298,84 @@ public class MongoConfigTest {
   }
 
   @Test
+  void testReadConfigSchemaHints() {
+    ReadConfig readConfig =
+        MongoConfig.readConfig(CONFIG_MAP).withOption(ReadConfig.SCHEMA_HINTS, "");
+    assertEquals(new StructType(), readConfig.getSchemaHints());
+
+    readConfig = MongoConfig.readConfig(CONFIG_MAP).withOption(ReadConfig.SCHEMA_HINTS, "   ");
+    assertEquals(new StructType(), readConfig.getSchemaHints());
+
+    StructType expectedStructType = StructType.fromDDL("a INT, b STRING");
+
+    // Spark shell DataType.toDDL format
+    readConfig =
+        MongoConfig.readConfig(CONFIG_MAP).withOption(ReadConfig.SCHEMA_HINTS, "a INT, b STRING");
+    assertEquals(expectedStructType, readConfig.getSchemaHints());
+
+    // Spark shell DataType.sql format
+    readConfig = MongoConfig.readConfig(CONFIG_MAP)
+        .withOption(ReadConfig.SCHEMA_HINTS, "STRUCT<a: INT, b: STRING>");
+    assertEquals(expectedStructType, readConfig.getSchemaHints());
+
+    // Spark shell DataType.simpleString format
+    readConfig = MongoConfig.readConfig(CONFIG_MAP)
+        .withOption(ReadConfig.SCHEMA_HINTS, "struct<a:int,b:string>");
+    assertEquals(expectedStructType, readConfig.getSchemaHints());
+
+    // Spark shell DataType.json format
+    readConfig = MongoConfig.readConfig(CONFIG_MAP)
+        .withOption(
+            ReadConfig.SCHEMA_HINTS,
+            "{\"type\":\"struct\",\"fields\":["
+                + "{\"name\":\"a\",\"type\":\"integer\",\"nullable\":true},"
+                + "{\"name\":\"b\",\"type\":\"string\",\"nullable\":true}]}");
+    assertEquals(expectedStructType, readConfig.getSchemaHints());
+
+    // FAILURE CASES
+    assertThrows(ConfigException.class, () -> {
+      MongoConfig.readConfig(CONFIG_MAP)
+          .withOption(ReadConfig.SCHEMA_HINTS, "version INVALID")
+          .getSchemaHints();
+    });
+
+    assertThrows(ConfigException.class, () -> {
+      MongoConfig.readConfig(CONFIG_MAP)
+          .withOption(
+              ReadConfig.SCHEMA_HINTS,
+              "{\"name\":\"version\",\"type\":\"integer\",\"nullable\":true}")
+          .getSchemaHints();
+    });
+  }
+
+  @Test
   void testMongoConfigStringHidesConnectionString() {
     MongoConfig mongoConfig = MongoConfig.createConfig(CONFIG_MAP);
     assertFalse(mongoConfig.toString().contains("mongodb://"));
     assertFalse(mongoConfig.toReadConfig().toString().contains("mongodb://"));
     assertFalse(mongoConfig.toWriteConfig().toString().contains("mongodb://"));
+  }
+
+  @Test
+  void testReadConfigMode() {
+    ReadConfig readConfig = MongoConfig.readConfig(CONFIG_MAP);
+    assertFalse(readConfig.isPermissive());
+    assertFalse(readConfig.dropMalformed());
+
+    readConfig = readConfig.withOption(ReadConfig.PARSE_MODE, "FAILFAST");
+    assertFalse(readConfig.isPermissive());
+    assertFalse(readConfig.dropMalformed());
+
+    readConfig = readConfig.withOption(ReadConfig.PARSE_MODE, "PERMISSIVE");
+    assertTrue(readConfig.isPermissive());
+    assertFalse(readConfig.dropMalformed());
+
+    readConfig = readConfig.withOption(ReadConfig.PARSE_MODE, "DROPMALFORMED");
+    assertFalse(readConfig.isPermissive());
+    assertTrue(readConfig.dropMalformed());
+
+    assertThrows(ConfigException.class, () -> MongoConfig.readConfig(CONFIG_MAP)
+        .withOption(ReadConfig.PARSE_MODE, "UNKNOWN"));
   }
 
   @ParameterizedTest

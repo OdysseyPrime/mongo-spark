@@ -17,31 +17,37 @@
 
 package com.mongodb.spark.sql.connector.read;
 
+import com.mongodb.client.ChangeStreamIterable;
+import com.mongodb.spark.sql.connector.assertions.Assertions;
 import java.util.Objects;
-
 import org.apache.spark.sql.connector.read.streaming.PartitionOffset;
 
-import org.bson.BsonDocument;
-
-import com.mongodb.spark.sql.connector.assertions.Assertions;
-
-/** A resume token partition offset */
-final class ResumeTokenPartitionOffset implements PartitionOffset {
+/**
+ * The continuous stream partition offset class.
+ *
+ * <p>Relies on a MongoOffset for determining the partitions offset.
+ */
+final class MongoContinuousInputPartitionOffset implements PartitionOffset {
   private static final long serialVersionUID = 1L;
-  private final BsonDocument resumeToken;
+  private final MongoOffset offset;
 
   /**
    * Construct a new instance
    *
-   * @param resumeToken the change stream resume token
+   * @param offset the MongoOffset
    */
-  ResumeTokenPartitionOffset(final BsonDocument resumeToken) {
-    Assertions.ensureArgument(() -> resumeToken != null, () -> "Invalid resume token");
-    this.resumeToken = resumeToken;
+  MongoContinuousInputPartitionOffset(final MongoOffset offset) {
+    Assertions.ensureArgument(() -> offset != null, () -> "Invalid resume token");
+    this.offset = offset;
   }
 
-  BsonDocument getResumeToken() {
-    return resumeToken;
+  public MongoOffset getOffset() {
+    return offset;
+  }
+
+  public <T> ChangeStreamIterable<T> applyToChangeStreamIterable(
+      final ChangeStreamIterable<T> changeStreamIterable) {
+    return offset.applyToChangeStreamIterable(changeStreamIterable);
   }
 
   @Override
@@ -52,17 +58,17 @@ final class ResumeTokenPartitionOffset implements PartitionOffset {
     if (o == null || getClass() != o.getClass()) {
       return false;
     }
-    final ResumeTokenPartitionOffset that = (ResumeTokenPartitionOffset) o;
-    return Objects.equals(getResumeToken(), that.getResumeToken());
+    final MongoContinuousInputPartitionOffset that = (MongoContinuousInputPartitionOffset) o;
+    return Objects.equals(offset, that.offset);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(getResumeToken());
+    return Objects.hash(offset);
   }
 
   @Override
   public String toString() {
-    return "ResumeTokenPartitionOffset{" + "resumeToken=" + resumeToken.toJson() + '}';
+    return "MongoContinuousInputPartitionOffset{offset=" + offset + '}';
   }
 }

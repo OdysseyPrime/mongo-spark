@@ -16,6 +16,9 @@
  */
 package com.mongodb.spark.sql.connector.read;
 
+import static com.mongodb.spark.sql.connector.config.MongoConfig.COMMENT_CONFIG;
+import static com.mongodb.spark.sql.connector.interop.JavaScala.asJava;
+import static java.lang.String.format;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static org.apache.spark.sql.types.DataTypes.createStructField;
@@ -24,12 +27,23 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.mongodb.client.model.CreateCollectionOptions;
+import com.mongodb.client.model.TimeSeriesGranularity;
+import com.mongodb.client.model.TimeSeriesOptions;
+import com.mongodb.spark.sql.connector.config.MongoConfig;
+import com.mongodb.spark.sql.connector.config.ReadConfig;
+import com.mongodb.spark.sql.connector.config.WriteConfig;
+import com.mongodb.spark.sql.connector.mongodb.MongoSparkConnectorTestCase;
+import com.mongodb.spark.sql.connector.schema.InferSchema;
+import com.mongodb.spark.sql.connector.schema.RowToBsonDocumentConverter;
 import java.util.HashMap;
 import java.util.List;
-
+import java.util.stream.Collectors;
+import org.apache.spark.SparkException;
 import org.apache.spark.api.java.function.MapFunction;
 import org.apache.spark.sql.Column;
 import org.apache.spark.sql.DataFrameReader;
@@ -38,90 +52,82 @@ import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
+import org.bson.BsonDocument;
 import org.junit.jupiter.api.Test;
 
-import org.bson.BsonDocument;
-
-import com.mongodb.client.model.CreateCollectionOptions;
-import com.mongodb.client.model.TimeSeriesGranularity;
-import com.mongodb.client.model.TimeSeriesOptions;
-
-import com.mongodb.spark.sql.connector.config.ReadConfig;
-import com.mongodb.spark.sql.connector.mongodb.MongoSparkConnectorTestCase;
-import com.mongodb.spark.sql.connector.schema.RowToBsonDocumentConverter;
-
 class MongoBatchTest extends MongoSparkConnectorTestCase {
-  private static final RowToBsonDocumentConverter CONVERTER =
-      new RowToBsonDocumentConverter(new StructType(), false);
+  private static BsonDocument fromRowDefault(final Row row) {
+    return new RowToBsonDocumentConverter(row.schema(), WriteConfig.ConvertJson.FALSE, false)
+        .fromRow(row);
+  }
 
   private static final String READ_RESOURCES_HOBBITS_JSON_PATH =
       "src/integrationTest/resources/data/read/hobbits.json";
   private static final String READ_RESOURCES_INFER_SCHEMA_JSON_PATH =
       "src/integrationTest/resources/data/read/infer_schema.json";
 
-  private static final String BSON_DOCUMENT_JSON =
-      "{"
-          + "\"_id\": 1, "
-          + "\"arrayEmpty\": [], "
-          + "\"arraySimple\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}], "
-          + "\"arrayComplex\": [{\"a\": {\"$numberInt\": \"1\"}}, {\"a\": {\"$numberInt\": \"2\"}}], "
-          + "\"arrayMixedTypes\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, true,"
-          + " [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}],"
-          + " {\"a\": {\"$numberInt\": \"2\"}}], "
-          + "\"arrayComplexMixedTypes\": [{\"a\": {\"$numberInt\": \"1\"}}, {\"a\": \"a\"}], "
-          + "\"binary\": {\"$binary\": {\"base64\": \"S2Fma2Egcm9ja3Mh\", \"subType\": \"00\"}}, "
-          + "\"boolean\": true, "
-          + "\"code\": {\"$code\": \"int i = 0;\"}, "
-          + "\"codeWithScope\": {\"$code\": \"int x = y\", \"$scope\": {\"y\": {\"$numberInt\": \"1\"}}}, "
-          + "\"dateTime\": {\"$date\": {\"$numberLong\": \"1577836801000\"}}, "
-          + "\"decimal128\": {\"$numberDecimal\": \"1.0\"}, "
-          + "\"documentEmpty\": {}, "
-          + "\"document\": {\"a\": {\"$numberInt\": \"1\"}}, "
-          + "\"double\": {\"$numberDouble\": \"62.0\"}, "
-          + "\"int32\": {\"$numberInt\": \"42\"}, "
-          + "\"int64\": {\"$numberLong\": \"52\"}, "
-          + "\"maxKey\": {\"$maxKey\": 1}, "
-          + "\"minKey\": {\"$minKey\": 1}, "
-          + "\"null\": null, "
-          + "\"objectId\": {\"$oid\": \"5f3d1bbde0ca4d2829c91e1d\"}, "
-          + "\"regex\": {\"$regularExpression\": {\"pattern\": \"^test.*regex.*xyz$\", \"options\": \"i\"}}, "
-          + "\"string\": \"the fox ...\", "
-          + "\"symbol\": {\"$symbol\": \"ruby stuff\"}, "
-          + "\"timestamp\": {\"$timestamp\": {\"t\": 305419896, \"i\": 5}}, "
-          + "\"undefined\": {\"$undefined\": true}"
-          + "}";
+  private static final String BSON_DOCUMENT_JSON = "{"
+      + "\"_id\": 1, "
+      + "\"arrayEmpty\": [], "
+      + "\"arraySimple\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}], "
+      + "\"arrayComplex\": [{\"a\": {\"$numberInt\": \"1\"}}, {\"a\": {\"$numberInt\": \"2\"}}], "
+      + "\"arrayMixedTypes\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, true,"
+      + " [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}],"
+      + " {\"a\": {\"$numberInt\": \"2\"}}], "
+      + "\"arrayComplexMixedTypes\": [{\"a\": {\"$numberInt\": \"1\"}}, {\"a\": \"a\"}], "
+      + "\"binary\": {\"$binary\": {\"base64\": \"S2Fma2Egcm9ja3Mh\", \"subType\": \"00\"}}, "
+      + "\"boolean\": true, "
+      + "\"code\": {\"$code\": \"int i = 0;\"}, "
+      + "\"codeWithScope\": {\"$code\": \"int x = y\", \"$scope\": {\"y\": {\"$numberInt\": \"1\"}}}, "
+      + "\"dateTime\": {\"$date\": {\"$numberLong\": \"1577836801000\"}}, "
+      + "\"decimal128\": {\"$numberDecimal\": \"1.0\"}, "
+      + "\"documentEmpty\": {}, "
+      + "\"document\": {\"a\": {\"$numberInt\": \"1\"}}, "
+      + "\"double\": {\"$numberDouble\": \"62.0\"}, "
+      + "\"int32\": {\"$numberInt\": \"42\"}, "
+      + "\"int64\": {\"$numberLong\": \"52\"}, "
+      + "\"maxKey\": {\"$maxKey\": 1}, "
+      + "\"minKey\": {\"$minKey\": 1}, "
+      + "\"null\": null, "
+      + "\"objectId\": {\"$oid\": \"5f3d1bbde0ca4d2829c91e1d\"}, "
+      + "\"regex\": {\"$regularExpression\": {\"pattern\": \"^test.*regex.*xyz$\", \"options\": \"i\"}}, "
+      + "\"string\": \"the fox ...\", "
+      + "\"symbol\": {\"$symbol\": \"ruby stuff\"}, "
+      + "\"timestamp\": {\"$timestamp\": {\"t\": 305419896, \"i\": 5}}, "
+      + "\"undefined\": {\"$undefined\": true}"
+      + "}";
 
-  private static final String EXPECTED_BSON_DOCUMENT_JSON =
-      "{"
-          + "\"_id\": 1, "
-          + "\"arrayEmpty\": [], "
-          + "\"arraySimple\": [1, 2, 3], "
-          + "\"arrayComplex\": [{\"a\": 1}, {\"a\": 2}], "
-          + "\"arrayMixedTypes\": [\"1\", \"2\", \"true\", \"[1, 2, 3]\", \"{\\\"a\\\": 2}\"], "
-          + "\"arrayComplexMixedTypes\": [{\"a\": \"1\"}, {\"a\": \"a\"}], "
-          + "\"binary\": {\"$binary\": {\"base64\": \"S2Fma2Egcm9ja3Mh\", \"subType\": \"00\"}}, "
-          + "\"boolean\": true, "
-          + "\"code\": \"{\\\"$code\\\": \\\"int i = 0;\\\"}\", "
-          + "\"codeWithScope\": \"{\\\"$code\\\": \\\"int x = y\\\", \\\"$scope\\\": {\\\"y\\\": 1}}\", "
-          + "\"dateTime\": {\"$date\": {\"$numberLong\": \"1577836801000\"}}, "
-          + "\"decimal128\": {\"$numberDecimal\": \"1.0\"}, "
-          + "\"documentEmpty\": {}, "
-          + "\"document\": {\"a\": {\"$numberInt\": \"1\"}}, "
-          + "\"double\": {\"$numberDouble\": \"62.0\"}, "
-          + "\"int32\": {\"$numberInt\": \"42\"}, "
-          + "\"int64\": {\"$numberLong\": \"52\"}, "
-          + "\"maxKey\": \"{\\\"$maxKey\\\": 1}\", "
-          + "\"minKey\": \"{\\\"$minKey\\\": 1}\", "
-          + "\"null\": null, "
-          + "\"objectId\": \"5f3d1bbde0ca4d2829c91e1d\", "
-          + "\"regex\": \"{\\\"$regularExpression\\\": {\\\"pattern\\\": \\\"^test.*regex.*xyz$\\\", \\\"options\\\": \\\"i\\\"}}\", "
-          + "\"string\": \"the fox ...\", "
-          + "\"symbol\": \"ruby stuff\", "
-          + "\"timestamp\": {\"$date\": \"1979-09-05T22:51:36Z\"}, "
-          + "\"undefined\": \"{\\\"$undefined\\\": true}\""
-          + "}";
+  private static final String EXPECTED_BSON_DOCUMENT_JSON = "{"
+      + "\"_id\": 1, "
+      + "\"arrayEmpty\": [], "
+      + "\"arraySimple\": [1, 2, 3], "
+      + "\"arrayComplex\": [{\"a\": 1}, {\"a\": 2}], "
+      + "\"arrayMixedTypes\": [\"1\", \"2\", \"true\", \"[1, 2, 3]\", \"{\\\"a\\\": 2}\"], "
+      + "\"arrayComplexMixedTypes\": [{\"a\": \"1\"}, {\"a\": \"a\"}], "
+      + "\"binary\": {\"$binary\": {\"base64\": \"S2Fma2Egcm9ja3Mh\", \"subType\": \"00\"}}, "
+      + "\"boolean\": true, "
+      + "\"code\": \"{\\\"$code\\\": \\\"int i = 0;\\\"}\", "
+      + "\"codeWithScope\": \"{\\\"$code\\\": \\\"int x = y\\\", \\\"$scope\\\": {\\\"y\\\": 1}}\", "
+      + "\"dateTime\": {\"$date\": {\"$numberLong\": \"1577836801000\"}}, "
+      + "\"decimal128\": {\"$numberDecimal\": \"1.0\"}, "
+      + "\"documentEmpty\": {}, "
+      + "\"document\": {\"a\": {\"$numberInt\": \"1\"}}, "
+      + "\"double\": {\"$numberDouble\": \"62.0\"}, "
+      + "\"int32\": {\"$numberInt\": \"42\"}, "
+      + "\"int64\": {\"$numberLong\": \"52\"}, "
+      + "\"maxKey\": \"{\\\"$maxKey\\\": 1}\", "
+      + "\"minKey\": \"{\\\"$minKey\\\": 1}\", "
+      + "\"null\": null, "
+      + "\"objectId\": \"5f3d1bbde0ca4d2829c91e1d\", "
+      + "\"regex\": \"{\\\"$regularExpression\\\": {\\\"pattern\\\": \\\"^test.*regex.*xyz$\\\", \\\"options\\\": \\\"i\\\"}}\", "
+      + "\"string\": \"the fox ...\", "
+      + "\"symbol\": \"ruby stuff\", "
+      + "\"timestamp\": {\"$date\": \"1979-09-05T22:51:36Z\"}, "
+      + "\"undefined\": \"{\\\"$undefined\\\": true}\""
+      + "}";
 
   @Test
   void testHandlesAllBsonTypes() {
@@ -131,7 +137,7 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
     SparkSession spark = getOrCreateSparkSession();
     Row actual = spark.read().format("mongodb").load().first();
 
-    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), CONVERTER.fromRow(actual));
+    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), fromRowDefault(actual));
   }
 
   @Test
@@ -144,23 +150,25 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
 
     // Simple types
     Row actual = dataset.where("_id = 1").first();
-    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), CONVERTER.fromRow(actual));
+    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), fromRowDefault(actual));
 
     // Casted types
-    actual = dataset.where("dateTime = cast('2020-01-01T00:00:01.000Z' as timestamp)").first();
-    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), CONVERTER.fromRow(actual));
+    actual = dataset
+        .where("dateTime = cast('2020-01-01T00:00:01.000Z' as timestamp)")
+        .first();
+    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), fromRowDefault(actual));
 
     // Find complex matches
     actual = dataset.where("arraySimple = array(1, 2, 3)").first();
-    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), CONVERTER.fromRow(actual));
+    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), fromRowDefault(actual));
 
     // Find nested matches
     actual = dataset.where("document.a = 1").first();
-    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), CONVERTER.fromRow(actual));
+    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), fromRowDefault(actual));
 
     // Functional filters - handled by spark
     actual = dataset.filter("array_contains(arraySimple, 2)").first();
-    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), CONVERTER.fromRow(actual));
+    assertEquals(BsonDocument.parse(EXPECTED_BSON_DOCUMENT_JSON), fromRowDefault(actual));
   }
 
   @Test
@@ -171,12 +179,10 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
         toBsonDocuments(spark.read().textFile(READ_RESOURCES_HOBBITS_JSON_PATH));
     getCollection().insertMany(collectionData);
 
-    StructType schema =
-        createStructType(
-            asList(
-                createStructField("_id", DataTypes.IntegerType, false),
-                createStructField("age", DataTypes.LongType, true),
-                createStructField("name", DataTypes.StringType, true)));
+    StructType schema = createStructType(asList(
+        createStructField("_id", DataTypes.IntegerType, false),
+        createStructField("age", DataTypes.LongType, true),
+        createStructField("name", DataTypes.StringType, true)));
 
     assertIterableEquals(
         collectionData,
@@ -187,37 +193,31 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
   void testReadsHandleNullsWithSchemaSupplied() {
     SparkSession spark = getOrCreateSparkSession();
 
-    List<BsonDocument> collectionData =
-        singletonList(
-            BsonDocument.parse(
-                "{"
-                    + "_id: 1,"
-                    + "arrayNull: null,"
-                    + "arrayContainingNull: [null],"
-                    + "structNull: null,"
-                    + "structContainingNull: {A: null},"
-                    + "mapNull: null,"
-                    + "mapContainingNull: {A: null},"
-                    + "}"));
+    List<BsonDocument> collectionData = singletonList(BsonDocument.parse("{"
+        + "_id: 1,"
+        + "arrayNull: null,"
+        + "arrayContainingNull: [null],"
+        + "structNull: null,"
+        + "structContainingNull: {A: null},"
+        + "mapNull: null,"
+        + "mapContainingNull: {A: null},"
+        + "}"));
     getCollection().insertMany(collectionData);
 
-    StructType schema =
-        new StructType()
-            .add("_id", DataTypes.IntegerType, true)
-            .add("arrayNull", DataTypes.createArrayType(DataTypes.StringType, true))
-            .add("arrayContainingNull", DataTypes.createArrayType(DataTypes.IntegerType, true))
-            .add(
-                "structNull",
-                new StructType().add("A", DataTypes.createArrayType(DataTypes.IntegerType, true)))
-            .add(
-                "structContainingNull",
-                new StructType().add("A", DataTypes.createArrayType(DataTypes.IntegerType, true)))
-            .add(
-                "mapNull",
-                DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType, true))
-            .add(
-                "mapContainingNull",
-                DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType, true));
+    StructType schema = new StructType()
+        .add("_id", DataTypes.IntegerType, true)
+        .add("arrayNull", DataTypes.createArrayType(DataTypes.StringType, true))
+        .add("arrayContainingNull", DataTypes.createArrayType(DataTypes.IntegerType, true))
+        .add(
+            "structNull",
+            new StructType().add("A", DataTypes.createArrayType(DataTypes.IntegerType, true)))
+        .add(
+            "structContainingNull",
+            new StructType().add("A", DataTypes.createArrayType(DataTypes.IntegerType, true)))
+        .add("mapNull", DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType, true))
+        .add(
+            "mapContainingNull",
+            DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType, true));
 
     Row row = spark.read().format("mongodb").schema(schema).load().first();
 
@@ -232,14 +232,13 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
           assertEquals(new GenericRowWithSchema(structValues, schema), row.getStruct(4));
         },
         () -> assertNull(row.get(5)),
-        () ->
-            assertEquals(
-                new HashMap<String, String>() {
-                  {
-                    put("A", null);
-                  }
-                },
-                row.getJavaMap(6)));
+        () -> assertEquals(
+            new HashMap<String, String>() {
+              {
+                put("A", null);
+              }
+            },
+            row.getJavaMap(6)));
   }
 
   @Test
@@ -254,39 +253,33 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
         .withDocumentClass(BsonDocument.class)
         .insertMany(collectionData);
 
-    Dataset<Row> dataSet =
-        spark
-            .read()
-            .format("mongodb")
-            .option(ReadConfig.COLLECTION_NAME_CONFIG, collectionName)
-            .load();
+    Dataset<Row> dataSet = spark
+        .read()
+        .format("mongodb")
+        .option(ReadConfig.COLLECTION_NAME_CONFIG, collectionName)
+        .load();
 
-    StructType expectedSchema =
-        createStructType(
-            asList(
-                createStructField("_id", DataTypes.IntegerType, true),
-                createStructField("email", DataTypes.StringType, true),
-                createStructField("misc", DataTypes.StringType, true),
-                createStructField("name", DataTypes.StringType, true)));
+    StructType expectedSchema = createStructType(asList(
+        createStructField("_id", DataTypes.IntegerType, true, InferSchema.INFERRED_METADATA),
+        createStructField("email", DataTypes.StringType, true, InferSchema.INFERRED_METADATA),
+        createStructField("misc", DataTypes.StringType, true, InferSchema.INFERRED_METADATA),
+        createStructField("name", DataTypes.StringType, true, InferSchema.INFERRED_METADATA)));
 
     assertEquals(expectedSchema, dataSet.schema());
     assertEquals(20, dataSet.count());
 
     // Ensure pipeline options are passed to infer schema
-    dataSet =
-        spark
-            .read()
-            .format("mongodb")
-            .option(ReadConfig.COLLECTION_NAME_CONFIG, collectionName)
-            .option(ReadConfig.AGGREGATION_PIPELINE_CONFIG, "{$match: {email: {$exists: false}}}")
-            .load();
+    dataSet = spark
+        .read()
+        .format("mongodb")
+        .option(ReadConfig.COLLECTION_NAME_CONFIG, collectionName)
+        .option(ReadConfig.AGGREGATION_PIPELINE_CONFIG, "{$match: {email: {$exists: false}}}")
+        .load();
 
-    expectedSchema =
-        createStructType(
-            asList(
-                createStructField("_id", DataTypes.IntegerType, true),
-                createStructField("misc", DataTypes.StringType, true),
-                createStructField("name", DataTypes.StringType, true)));
+    expectedSchema = createStructType(asList(
+        createStructField("_id", DataTypes.IntegerType, true, InferSchema.INFERRED_METADATA),
+        createStructField("misc", DataTypes.StringType, true, InferSchema.INFERRED_METADATA),
+        createStructField("name", DataTypes.StringType, true, InferSchema.INFERRED_METADATA)));
 
     assertEquals(expectedSchema, dataSet.schema());
     assertEquals(14, dataSet.count());
@@ -400,7 +393,8 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
             .map((MapFunction<Row, String>) r -> r.getString(2), Encoders.STRING())
             .collectAsList());
 
-    // IsNotNull - filter handled by Spark alone
+    // IsNotNull
+    getCollection().insertOne(BsonDocument.parse("{_id: 11, name: 'Gollum', age: null}"));
     assertIterableEquals(
         asList(
             "Bilbo Baggins",
@@ -418,17 +412,174 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
   }
 
   @Test
-  void testReadsCanFilterNonExistentFields() {
+  void testReadsFiltersHandleEscapedFieldNames() {
     SparkSession spark = getOrCreateSparkSession();
 
     List<BsonDocument> collectionData =
+        toBsonDocuments(spark.read().textFile(READ_RESOURCES_HOBBITS_JSON_PATH)).stream()
+            .map(d -> d.append("full-name", d.remove("name"))
+                .append("actual-age", d.remove("age"))
+                .append(
+                    "sub-doc",
+                    new BsonDocument("full-name", d.get("full-name"))
+                        .append("actual-age", d.get("actual-age")))
+                .append(
+                    "fieldWith`Backtic",
+                    new BsonDocument("name", d.get("full-name"))
+                        .append("age", d.get("actual-age"))))
+            .collect(Collectors.toList());
+    getCollection().insertMany(collectionData);
+    getCollection()
+        .insertOne(
+            BsonDocument.parse(
+                "{_id: 10, 'full-name': 'Bombur', 'sub-doc': {'full-name': 'Bombur'}, 'fieldWith`Backtic': {'name': 'Bombur'}}"));
+
+    Dataset<Row> ds = spark.read().format("mongodb").load();
+    MapFunction<Row, String> getFullName = r -> r.getString(3);
+
+    // EqualNullSafe
+    assertIterableEquals(
+        singletonList("Gandalf"),
+        ds.filter(new Column("actual-age").eqNullSafe(1000))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // EqualTo
+    assertIterableEquals(
+        singletonList("Gandalf"),
+        ds.filter(new Column("actual-age").equalTo(1000))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // GreaterThan
+    assertIterableEquals(
+        asList("Gandalf", "Thorin"),
+        ds.filter(new Column("actual-age").gt(178))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // GreaterThanOrEqual
+    assertIterableEquals(
+        asList("Gandalf", "Thorin", "Balin"),
+        ds.filter(new Column("actual-age").geq(178))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // In
+    assertIterableEquals(
+        asList("Kíli", "Fíli"),
+        ds.filter(new Column("full-name").isin("Kíli", "Fíli"))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // IsNull
+    assertIterableEquals(
+        singletonList("Bombur"),
+        ds.filter(new Column("actual-age").isNull())
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // LessThan
+    assertIterableEquals(
+        asList("Bilbo Baggins", "Kíli"),
+        ds.filter(new Column("actual-age").lt(82))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // LessThanOrEqual
+    assertIterableEquals(
+        asList("Bilbo Baggins", "Kíli", "Fíli"),
+        ds.filter(new Column("actual-age").leq(82))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // Not
+    assertIterableEquals(
+        asList("Gandalf", "Thorin", "Balin", "Kíli", "Dwalin", "Óin", "Glóin", "Fíli"),
+        ds.filter(new Column("actual-age").notEqual(50))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // StringContains
+    assertIterableEquals(
+        asList("Bilbo Baggins", "Thorin", "Balin", "Dwalin", "Óin", "Glóin"),
+        ds.filter(new Column("full-name").contains("in"))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // StringEndsWith
+    assertIterableEquals(
+        asList("Kíli", "Fíli"),
+        ds.filter(new Column("full-name").endsWith("li"))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // StringStartsWith
+    assertIterableEquals(
+        asList("Gandalf", "Glóin"),
+        ds.filter(new Column("full-name").startsWith("G"))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // And
+    assertIterableEquals(
+        singletonList("Gandalf"),
+        ds.filter(new Column("full-name").startsWith("G").and(new Column("actual-age").gt(200)))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+    // Or
+    assertIterableEquals(
+        asList("Bilbo Baggins", "Balin", "Kíli", "Fíli", "Bombur"),
+        ds.filter(new Column("full-name").startsWith("B").or(new Column("actual-age").lt(150)))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // IsNotNull - filter handled by Spark alone
+    assertIterableEquals(
         asList(
-            BsonDocument.parse("{a: 1, b: []}"),
-            BsonDocument.parse("{a: 2, b: [\"1\"]}"),
-            BsonDocument.parse("{a: 3}"),
-            BsonDocument.parse("{b: [\"2\"]}"),
-            BsonDocument.parse("{b: [\"3\"]}"),
-            BsonDocument.parse("{a: 4, b: [\"4\"]}"));
+            "Bilbo Baggins",
+            "Gandalf",
+            "Thorin",
+            "Balin",
+            "Kíli",
+            "Dwalin",
+            "Óin",
+            "Glóin",
+            "Fíli"),
+        ds.filter(new Column("actual-age").isNotNull())
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // Supports nested escaped fields
+    assertIterableEquals(
+        asList("Bilbo Baggins", "Balin", "Kíli", "Fíli", "Bombur"),
+        ds.filter(new Column("sub-doc.full-name")
+                .startsWith("B")
+                .or(new Column("sub-doc.actual-age").lt(150)))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+
+    // Supports escaped fields containing backtics
+    assertIterableEquals(
+        asList("Bilbo Baggins", "Balin", "Kíli", "Fíli", "Bombur"),
+        ds.filter(new Column("`fieldWith``Backtic`.name")
+                .startsWith("B")
+                .or(new Column("`fieldWith``Backtic`.age").lt(150)))
+            .map(getFullName, Encoders.STRING())
+            .collectAsList());
+  }
+
+  @Test
+  void testReadsCanFilterNonExistentFields() {
+    SparkSession spark = getOrCreateSparkSession();
+
+    List<BsonDocument> collectionData = asList(
+        BsonDocument.parse("{a: 1, b: []}"),
+        BsonDocument.parse("{a: 2, b: [\"1\"]}"),
+        BsonDocument.parse("{a: 3}"),
+        BsonDocument.parse("{b: [\"2\"]}"),
+        BsonDocument.parse("{b: [\"3\"]}"),
+        BsonDocument.parse("{a: 4, b: [\"4\"]}"));
     getCollection().insertMany(collectionData);
 
     Dataset<Row> ds = spark.read().format("mongodb").load();
@@ -479,54 +630,151 @@ class MongoBatchTest extends MongoSparkConnectorTestCase {
         .createCollection(
             getCollectionName(),
             new CreateCollectionOptions()
-                .timeSeriesOptions(
-                    new TimeSeriesOptions("timestamp")
-                        .metaField("metadata")
-                        .granularity(TimeSeriesGranularity.HOURS)));
+                .timeSeriesOptions(new TimeSeriesOptions("timestamp")
+                    .metaField("metadata")
+                    .granularity(TimeSeriesGranularity.HOURS)));
 
-    List<BsonDocument> collectionData =
-        asList(
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-18T00:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-18T04:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 11}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-18T08:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 11}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-18T12:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-18T16:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 16}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-18T20:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 15}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-19T00:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 13}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-19T04:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-19T08:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 11}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-19T12:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-19T16:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 17}"),
-            BsonDocument.parse(
-                "{'timestamp': {'$date': '2021-05-19T20:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"));
+    List<BsonDocument> collectionData = asList(
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-18T00:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-18T04:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 11}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-18T08:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 11}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-18T12:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-18T16:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 16}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-18T20:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 15}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-19T00:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 13}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-19T04:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-19T08:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 11}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-19T12:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-19T16:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 17}"),
+        BsonDocument.parse(
+            "{'timestamp': {'$date': '2021-05-19T20:00:00Z'}, metadata: {sensorId: 5578, type: 'temperature'}, temp: 12}"));
     getCollection().insertMany(collectionData);
 
     DataFrameReader dfr = spark.read().format("mongodb");
 
     String partitioner =
         "com.mongodb.spark.sql.connector.read.partitioner.PaginateBySizePartitioner";
-    assertEquals(collectionData.size(), dfr.option("partitioner", partitioner).load().count());
+    assertEquals(
+        collectionData.size(), dfr.option("partitioner", partitioner).load().count());
 
     partitioner =
         "com.mongodb.spark.sql.connector.read.partitioner.PaginateIntoPartitionsPartitioner";
-    assertEquals(collectionData.size(), dfr.option("partitioner", partitioner).load().count());
+    assertEquals(
+        collectionData.size(), dfr.option("partitioner", partitioner).load().count());
 
     partitioner = "com.mongodb.spark.sql.connector.read.partitioner.SamplePartitioner";
-    assertEquals(collectionData.size(), dfr.option("partitioner", partitioner).load().count());
+    assertEquals(
+        collectionData.size(), dfr.option("partitioner", partitioner).load().count());
 
     partitioner = "com.mongodb.spark.sql.connector.read.partitioner.SinglePartitionPartitioner";
-    assertEquals(collectionData.size(), dfr.option("partitioner", partitioner).load().count());
+    assertEquals(
+        collectionData.size(), dfr.option("partitioner", partitioner).load().count());
+  }
+
+  @Test
+  void testLogsCommentsInProfilerLogs() {
+    SparkSession spark = getOrCreateSparkSession();
+
+    List<BsonDocument> collectionData =
+        toBsonDocuments(spark.read().textFile(READ_RESOURCES_HOBBITS_JSON_PATH));
+    getCollection().drop();
+    getCollection().insertMany(collectionData);
+
+    ReadConfig readConfig = MongoConfig.readConfig(asJava(spark.initialSessionOptions()))
+        .withOption(COMMENT_CONFIG, TEST_COMMENT);
+
+    assertCommentsInProfile(
+        () -> {
+          StructType schema = createStructType(asList(
+              createStructField("_id", DataTypes.IntegerType, false),
+              createStructField("age", DataTypes.LongType, true),
+              createStructField("name", DataTypes.StringType, true)));
+          assertIterableEquals(
+              collectionData,
+              toBsonDocuments(spark
+                  .read()
+                  .option(COMMENT_CONFIG, TEST_COMMENT)
+                  .format("mongodb")
+                  .schema(schema)
+                  .load()
+                  .toJSON()));
+        },
+        readConfig);
+  }
+
+  @Test
+  void testReadsWithParseMode() {
+    SparkSession spark = getOrCreateSparkSession();
+
+    List<BsonDocument> collectionData = asList(
+        BsonDocument.parse("{_id: 1, name: 'Ada Lovelace', address: {street: 'St James Square'}}"),
+        BsonDocument.parse(
+            "{_id: 2, name: 'Charles Babbage', address: {street: '5 Devonshire Street'}}"),
+        BsonDocument.parse(
+            "{_id: 3, name: 'Alan Turing', address: '{\"street\": \"Bletchley Hall\"}'}"),
+        BsonDocument.parse("{_id: 4, name: 'Timothy Berners-Lee', address: {}}"));
+    getCollection().insertMany(collectionData);
+
+    StructType schema = createStructType(asList(
+        createStructField("_id", DataTypes.IntegerType, false),
+        createStructField("name", DataTypes.StringType, true),
+        createStructField("address", DataType.fromDDL("street STRING"), true)));
+
+    DataFrameReader errorDFR = spark.read().format("mongodb").schema(schema);
+    assertThrows(SparkException.class, () -> errorDFR.load().toJSON().collect());
+    assertThrows(SparkException.class, () -> errorDFR
+        .option(ReadConfig.PARSE_MODE, ReadConfig.ParseMode.FAILFAST.name())
+        .load()
+        .toJSON()
+        .collect());
+
+    DataFrameReader dfr = spark.read().format("mongodb").schema(schema);
+    List<BsonDocument> expectedData =
+        collectionData.stream().map(BsonDocument::clone).collect(Collectors.toList());
+    expectedData.remove(2);
+    assertEquals(
+        expectedData,
+        toBsonDocuments(dfr.option(ReadConfig.PARSE_MODE, ReadConfig.ParseMode.DROPMALFORMED.name())
+            .load()
+            .toJSON()));
+
+    // Note toJSON uses the default ignoreNullFields = true
+    dfr = dfr.option(ReadConfig.PARSE_MODE, ReadConfig.ParseMode.PERMISSIVE.name());
+    expectedData = collectionData.stream().map(BsonDocument::clone).collect(Collectors.toList());
+    expectedData.remove(2);
+    expectedData.add(2, BsonDocument.parse("{_id: 3, name: 'Alan Turing'}"));
+    assertEquals(expectedData, toBsonDocuments(dfr.load().toJSON()));
+
+    // No corrupted field in the schema - so ignore
+    String corruptedField = "_corrupted";
+    dfr = dfr.option(ReadConfig.COLUMN_NAME_OF_CORRUPT_RECORD, corruptedField);
+    assertEquals(expectedData, toBsonDocuments(dfr.load().toJSON()));
+
+    // With corrupted field
+    StructType schemaWithCorruptedField = schema.add(corruptedField, DataTypes.StringType);
+    dfr = dfr.schema(schemaWithCorruptedField);
+    expectedData = collectionData.stream().map(BsonDocument::clone).collect(Collectors.toList());
+
+    expectedData.remove(2);
+    expectedData.add(
+        2,
+        BsonDocument.parse(
+            format(
+                "{_id: 3, name: 'Alan Turing', _corrupted: '%s'}",
+                "{\"_id\": 3, \"name\": \"Alan Turing\", \"address\": \"{\\\\\"street\\\\\": \\\\\"Bletchley Hall\\\\\"}\"}")));
+
+    assertEquals(expectedData, toBsonDocuments(dfr.load().toJSON()));
   }
 
   private List<BsonDocument> toBsonDocuments(final Dataset<String> dataset) {

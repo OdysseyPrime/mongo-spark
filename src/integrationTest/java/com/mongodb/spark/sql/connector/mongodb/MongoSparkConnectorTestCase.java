@@ -15,28 +15,39 @@
  */
 package com.mongodb.spark.sql.connector.mongodb;
 
-import java.util.HashMap;
-import java.util.Map;
-
-import org.apache.spark.SparkConf;
-import org.apache.spark.SparkContext;
-import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.util.CaseInsensitiveStringMap;
-import org.junit.jupiter.api.extension.RegisterExtension;
-import org.opentest4j.AssertionFailedError;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.bson.BsonDocument;
+import static java.lang.String.format;
+import static java.util.Arrays.asList;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.mongodb.MongoNamespace;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
 import com.mongodb.connection.ClusterType;
 import com.mongodb.connection.ServerDescription;
-
 import com.mongodb.spark.sql.connector.config.MongoConfig;
+import com.mongodb.spark.sql.connector.config.ReadConfig;
+import com.mongodb.spark.sql.connector.config.WriteConfig;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkContext;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.bson.BsonDocument;
+import org.bson.Document;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.opentest4j.AssertionFailedError;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @MongoDBOnline()
 public class MongoSparkConnectorTestCase {
@@ -45,6 +56,10 @@ public class MongoSparkConnectorTestCase {
 
   @RegisterExtension
   public static final MongoSparkConnectorHelper HELPER = new MongoSparkConnectorHelper();
+
+  public static final String IGNORE_COMMENT = "IGNORE_THIS_COMMENT";
+
+  public static final String TEST_COMMENT = "TEST_COMMENT";
 
   public String getDatabaseName() {
     return HELPER.getDatabaseName();
@@ -140,6 +155,74 @@ public class MongoSparkConnectorTestCase {
     HELPER.loadSampleData(numberOfDocuments, sizeInMB, config);
   }
 
+  /**
+   * Creates complex sample data
+   *
+   * @param numberOfDocuments the total number of documents to create
+   * @param sizeInMB the total size of the documents
+   * @param config the config used for the database and collection
+   */
+  public void loadComplexSampleData(
+      final int numberOfDocuments, final int sizeInMB, final MongoConfig config) {
+    HELPER.loadComplexSampleData(numberOfDocuments, sizeInMB, config);
+  }
+
+  /** Runs events with the profiler on. */
+  public void assertCommentsInProfile(final Runnable runnable, final ReadConfig readConfig) {
+    assumeFalse(isSharded());
+    assertNotNull(readConfig.getComment());
+    assertCommentsInProfile(runnable, readConfig.getDatabaseName(), readConfig.getCollectionName());
+  }
+
+  /** Runs events with the profiler on. */
+  public void assertCommentsInProfile(final Runnable runnable, final WriteConfig writeConfig) {
+    assertNotNull(writeConfig.getComment());
+    assertCommentsInProfile(
+        runnable, writeConfig.getDatabaseName(), writeConfig.getCollectionName());
+  }
+
+  private void assertCommentsInProfile(
+      final Runnable runnable, final String databaseName, final String collectionName) {
+    assumeTrue(isAtLeastFiveDotZero());
+    assumeFalse(isSharded());
+    MongoDatabase database = HELPER.getMongoClient().getDatabase(databaseName);
+    MongoCollection<Document> profileCollection = database.getCollection("system.profile");
+    try {
+      profileCollection.drop();
+      database.runCommand(new Document("profile", 1)
+          .append(
+              "filter",
+              Filters.eq("ns", new MongoNamespace(databaseName, collectionName).getFullName())));
+
+      runnable.run();
+
+      List<Document> profileDocsWithComment = profileCollection
+          .find(Filters.eq("command.comment", TEST_COMMENT))
+          .into(new ArrayList<>());
+      assertFalse(
+          profileDocsWithComment.isEmpty(),
+          format("There were no commands observed with the comment \"%s\"", TEST_COMMENT));
+
+      List<Document> profileDocs = profileCollection
+          .find(Filters.nor(
+              Filters.exists("command.killCursors"), Filters.eq("command.comment", IGNORE_COMMENT)))
+          .into(new ArrayList<>());
+
+      List<String> withoutComment = profileDocs.stream()
+          .filter(d -> !d.getEmbedded(asList("command", "comment"), "").equals(TEST_COMMENT))
+          .map(Document::toJson)
+          .collect(Collectors.toList());
+
+      assertTrue(
+          withoutComment.isEmpty(),
+          () ->
+              format("The following commands were observed without comments: %s", withoutComment));
+    } finally {
+      database.runCommand(BsonDocument.parse("{profile: 0}"));
+      profileCollection.drop();
+    }
+  }
+
   public SparkConf getSparkConf() {
     return HELPER.getSparkConf();
   }
@@ -149,7 +232,9 @@ public class MongoSparkConnectorTestCase {
   }
 
   public SparkSession getOrCreateSparkSession(final SparkConf sparkConfig) {
-    return SparkSession.builder().sparkContext(getOrCreateSparkContext(sparkConfig)).getOrCreate();
+    return SparkSession.builder()
+        .sparkContext(getOrCreateSparkContext(sparkConfig))
+        .getOrCreate();
   }
 
   public SparkContext getOrCreateSparkContext(final SparkConf sparkConfig) {
