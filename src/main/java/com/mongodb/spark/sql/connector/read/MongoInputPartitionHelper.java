@@ -135,12 +135,29 @@ final class MongoInputPartitionHelper {
       return Optional.empty();
     }
 
+    if (hasDottedFields(schema)) {
+      return Optional.empty();
+    }
+
     String fieldPrefix = streamPublishFullDocumentOnly ? "fullDocument." : "";
     BsonDocument projections = new BsonDocument();
     Arrays.stream(schema.fields())
         .map(f -> fieldPrefix + f.name())
         .forEach(f -> projections.append(f, new BsonInt32(1)));
     return Optional.of(new BsonDocument("$project", projections));
+  }
+
+  /**
+   * Returns {@code true} if any non-struct field in the schema has a dot in its name.
+   * Such fields cannot be safely used in a MongoDB {@code $project} stage,
+   * as dots are interpreted as nested field delimiter.
+   *
+   * @param schema the Spark schema to check.
+   * @return {@code true} if a non struct field with a dot in its name exists, otherwise returns {@code false}.
+   */
+  private static boolean hasDottedFields(StructType schema) {
+    return Arrays.stream(schema.fields())
+        .anyMatch(field -> field.name().contains(".") && !(field.dataType() instanceof StructType));
   }
 
   private static Function<BsonDocument, List<BsonDocument>> mergePipelineFunction(
