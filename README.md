@@ -5,7 +5,6 @@ The official MongoDB Spark Connector.
 ## Documentation
 
 See: https://docs.mongodb.com/spark-connector/
-
 [API Documentation](https://www.javadoc.io/doc/org.mongodb.spark/mongo-spark-connector)
 
 ## Downloading
